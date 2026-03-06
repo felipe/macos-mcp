@@ -13,6 +13,7 @@ Claude Code plugin for iMessage on macOS. Read, send, and auto-reply to iMessage
 
 - macOS with Messages app signed in to iMessage
 - Full Disk Access for Terminal (System Settings > Privacy & Security > Full Disk Access)
+- Accessibility permission for Terminal (System Settings > Privacy & Security > Accessibility) — required for typing indicator
 - `sqlite3`, `osascript`, `sips`, `bc` (all ship with macOS)
 
 ## What It Does
@@ -34,6 +35,7 @@ Individual iMessage commands available as Claude Code skills:
 | `send-file.sh` | Send a file attachment |
 | `list-conversations.sh` | List recent conversations |
 | `get-message-attachments.sh` | Retrieve and process message attachments |
+| `typing-indicator.sh` | Trigger native iMessage typing bubble via System Events |
 
 ### 2. Autonomous Daemon
 
@@ -57,6 +59,7 @@ See [daemon/README.md](skills/imessage/daemon/README.md) for full documentation.
 - **Reading messages**: SQLite queries against `~/Library/Messages/chat.db` (preferred), with AppleScript as a fallback
 - **Sending messages**: AppleScript controlling Messages.app — tries iMessage first, falls back to SMS
 - **Daemon mode**: Polls the database for new messages, spawns autonomous Claude Code sessions to handle them
+- **Typing indicator**: Types into the Messages input field to show the native typing bubble while the agent works
 
 ## Project Structure
 
@@ -66,6 +69,7 @@ commands/                # Slash commands (/imessage-daemon)
 skills/imessage/         # Shell scripts for iMessage operations
   daemon/                # Auto-reply daemon
 examples/                # Example configuration files
+tests/                   # Test suite
 ```
 
 ## Configuration
