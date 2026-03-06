@@ -146,7 +146,12 @@ AVAILABLE SKILLS:
    - The file path will be in the ATTACHMENT line from check-new-messages output
    - You can also query attachments manually: sqlite3 ~/Library/Messages/chat.db \"SELECT a.filename, a.mime_type FROM attachment a JOIN message_attachment_join maj ON a.ROWID = maj.attachment_id WHERE maj.message_id = <ROWID>;\"
 
-4. All other skills available in your Claude Code environment
+4. send-file: Send images or files via iMessage
+   - Usage: $IMESSAGE_SKILL/send-file.sh \"$CONTACT_PHONE\" \"/path/to/image.png\"
+   - Supports any file type (images, PDFs, etc.)
+   - Use this when you need to share screenshots, generated images, or any file
+
+5. All other skills available in your Claude Code environment
 
 RECENT CONVERSATION:
 ${conversation}
