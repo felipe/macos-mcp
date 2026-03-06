@@ -17,6 +17,7 @@ This daemon monitors incoming iMessages from a specific contact and automaticall
 - macOS with Messages app signed in to iMessage
 - Claude Code installed and in PATH
 - Full Disk Access permission for Terminal
+- Accessibility permission for Terminal (for typing indicator)
 - Environment variables configured (see Configuration below)
 
 ## Quick Start
@@ -84,10 +85,13 @@ pkill -f imessage-auto-reply-daemon
 When a new message arrives:
 
 1. **Check for running agent**: If already running, skip (agent will check for new messages)
-2. **Load context**: Get last 10 messages for conversation history
-3. **Resume or start**: Resume existing conversation ID or start new one
-4. **Launch agent**: Start Claude Code with autonomous agent prompt
-5. **Track PID**: Save process ID to prevent duplicate agents
+2. **Show typing indicator**: Types into Messages input field so recipient sees the native typing bubble
+3. **Load context**: Get last 10 messages for conversation history
+4. **Resume or start**: Resume existing conversation ID or start new one
+5. **Launch agent**: Start Claude Code with autonomous agent prompt
+6. **Keep indicator alive**: Refreshes the typing indicator every 30s while the agent works
+7. **Track PID**: Save process ID to prevent duplicate agents
+8. **Clear indicator**: Stops the typing bubble when the agent finishes (success or failure)
 
 ### File Structure
 

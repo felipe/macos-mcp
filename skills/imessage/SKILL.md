@@ -86,6 +86,24 @@ Send a file attachment via iMessage.
 ./send-file.sh "+14155551234" "/path/to/image.jpg"
 ```
 
+### Typing Indicator
+
+#### `typing-indicator.sh`
+Trigger the native iMessage typing bubble by typing into the Messages input field via System Events. Used by the daemon to show the recipient that a response is being prepared.
+
+```bash
+# Start typing indicator (opens conversation, types a space)
+./typing-indicator.sh "+14155551234" start
+
+# Refresh to prevent ~60s timeout
+./typing-indicator.sh "+14155551234" keepalive
+
+# Clear the input field
+./typing-indicator.sh "+14155551234" stop
+```
+
+Requires Accessibility permissions for the calling process.
+
 ### Utilities
 
 #### `list-conversations.sh`
