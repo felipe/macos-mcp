@@ -1,0 +1,20 @@
+# Temporary files
+tmp/
+*.tmp
+
+# Environment files
+.env
+*.env
+!examples/.env.example
+
+# macOS
+.DS_Store
+._*
+
+# Logs
+*.log
+
+# Editor
+*.swp
+*.swo
+*~

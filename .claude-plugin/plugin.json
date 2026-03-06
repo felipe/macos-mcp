@@ -1,0 +1,22 @@
+{
+  "name": "imessage",
+  "description": "iMessage integration for Claude Code - read messages, send replies, and run autonomous agents via iMessage",
+  "version": "1.0.0",
+  "author": {
+    "name": "Felipe Oduardo Sierra"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/felipeoduardosierra/iMessage-Claude-Bridge"
+  },
+  "keywords": [
+    "imessage",
+    "messages",
+    "sms",
+    "chat",
+    "automation",
+    "daemon",
+    "agent"
+  ],
+  "license": "MIT"
+}
