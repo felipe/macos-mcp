@@ -14,7 +14,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 TMP_DIR="${IMESSAGE_TMP_DIR:-$HOME/tmp/imessage}"
 PROCESSED_LOG="$TMP_DIR/processed_imessages.log"
 CONVERSATION_ID_FILE="$TMP_DIR/imessage_claude_conversation_id.txt"
