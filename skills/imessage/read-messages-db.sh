@@ -90,5 +90,20 @@ fi | while IFS='|' read -r rowid text is_from_me date handle_id attributed_body_
         direction="[IN]"
     fi
 
-    echo "[$readable_date] $direction $text"
+    # Check for attachments
+    att_info=$(sqlite3 "$DB_PATH" "
+    SELECT a.filename, a.mime_type, a.transfer_name
+    FROM attachment a
+    JOIN message_attachment_join maj ON a.ROWID = maj.attachment_id
+    WHERE maj.message_id = $rowid;
+    " 2>/dev/null)
+
+    if [ -n "$att_info" ]; then
+        while IFS='|' read -r att_filename att_mime att_name; do
+            att_filename="${att_filename/#\~/$HOME}"
+            echo "[$readable_date] $direction $text [ATTACHMENT: $att_filename ($att_mime)]"
+        done <<< "$att_info"
+    else
+        echo "[$readable_date] $direction $text"
+    fi
 done
