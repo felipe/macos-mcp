@@ -79,5 +79,17 @@ sqlite3 "$DB_PATH" "$QUERY" | while IFS='|' read -r rowid text is_from_me date h
     if [ -n "$chat_identifier" ]; then
         echo "CHAT: $chat_identifier"
     fi
+
+    # Check for attachments on this message
+    sqlite3 "$DB_PATH" "
+    SELECT a.filename, a.mime_type, a.transfer_name
+    FROM attachment a
+    JOIN message_attachment_join maj ON a.ROWID = maj.attachment_id
+    WHERE maj.message_id = $rowid;
+    " | while IFS='|' read -r att_filename att_mime att_name; do
+        att_filename="${att_filename/#\~/$HOME}"
+        echo "ATTACHMENT: $att_filename|$att_mime|$att_name"
+    done
+
     echo "---"
 done

@@ -141,7 +141,12 @@ AVAILABLE SKILLS:
    - Usage: $IMESSAGE_SKILL/check-new-messages-db.sh \"$CONTACT_PHONE\"
    - Returns new messages from last hour, or empty if none
 
-3. All other skills available in your Claude Code environment
+3. view-attachment: When a message has attachments (shown as ATTACHMENT: lines or ￼ character in text)
+   - Use the Read tool to view image files directly (PNG, JPG, HEIC, etc.)
+   - The file path will be in the ATTACHMENT line from check-new-messages output
+   - You can also query attachments manually: sqlite3 ~/Library/Messages/chat.db \"SELECT a.filename, a.mime_type FROM attachment a JOIN message_attachment_join maj ON a.ROWID = maj.attachment_id WHERE maj.message_id = <ROWID>;\"
+
+4. All other skills available in your Claude Code environment
 
 RECENT CONVERSATION:
 ${conversation}
@@ -175,7 +180,9 @@ IMPORTANT RULES:
 - Keep messages concise and natural (this is iMessage, not email)
 - If you're stuck or need clarification, ask via iMessage
 - Don't apologize excessively - be helpful and direct
-- If the request is dangerous or inappropriate, politely decline"
+- If the request is dangerous or inappropriate, politely decline
+- When you see ￼ (object replacement character) in message text, it means there's an attachment — check for ATTACHMENT lines in the message data and use Read to view image files
+- Expand ~ to \$HOME in attachment paths before reading them"
 
     # Start Claude Code agent
     log "  Launching Claude Code agent..."
