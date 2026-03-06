@@ -177,6 +177,9 @@ IMPORTANT RULES:
 - Don't apologize excessively - be helpful and direct
 - If the request is dangerous or inappropriate, politely decline"
 
+    # Clear typing indicator before agent takes over
+    "$IMESSAGE_SKILL/typing-indicator.sh" "$CONTACT_PHONE" stop > /dev/null 2>&1
+
     # Start Claude Code agent
     log "  Launching Claude Code agent..."
     claude -p "$agent_prompt" $resume_flag --dangerously-skip-permissions > "$AGENT_LOG" 2>&1 &
@@ -236,8 +239,8 @@ while true; do
 
                             # Only start agent if one isn't already running
                             if ! is_agent_running; then
-                                # Send thinking indicator before agent starts
-                                echo "..." | "$IMESSAGE_SKILL/send-message.sh" "$CONTACT_PHONE" > /dev/null 2>&1
+                                # Trigger native typing indicator
+                                "$IMESSAGE_SKILL/typing-indicator.sh" "$CONTACT_PHONE" start > /dev/null 2>&1
                                 start_autonomous_agent "$current_text" "${current_chat:-$CONTACT_PHONE}"
                             else
                                 log "  Agent already running, skipping (agent will check for new messages)"
