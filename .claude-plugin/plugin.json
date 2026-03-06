@@ -5,10 +5,7 @@
   "author": {
     "name": "Felipe Oduardo Sierra"
   },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/felipe/iMessage-Claude-Bridge"
-  },
+  "repository": "https://github.com/felipe/iMessage-Claude-Bridge",
   "keywords": [
     "imessage",
     "messages",
