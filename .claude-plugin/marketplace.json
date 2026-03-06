@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "imessage",
-      "source": ".",
+      "source": "./",
       "description": "iMessage integration for Claude Code — read, send, and auto-reply to iMessages on macOS"
     }
   ]
