@@ -223,6 +223,7 @@ YOUR AUTONOMOUS AGENT WORKFLOW:
 
 TASK REGISTRY:
 - Directory: ${TMP_DIR}/active_tasks/
+- Sanitize the thread_id for filenames: replace every character that is NOT [a-zA-Z0-9_-] with _
 - To register a task, create a file: ${TMP_DIR}/active_tasks/<sanitized_thread_id>.task
 - File format (plain text):
   DESCRIPTION: <one-line summary of the task>
@@ -336,7 +337,7 @@ while true; do
                             # - If it's a reply, use the thread_originator_guid
                             # - If it's a new message with a GUID, use its own GUID (starts a new thread)
                             # - Otherwise fall back to "default" for backward compatibility
-                            local thread_id="default"
+                            thread_id="default"
                             if [ -n "$current_thread_reply_to" ]; then
                                 thread_id="$current_thread_reply_to"
                             elif [ -n "$current_guid" ]; then

@@ -43,7 +43,7 @@ ONE_HOUR_AGO=$((CURRENT_TIME - 3600))
 APPLE_ONE_HOUR_AGO=$(echo "($ONE_HOUR_AGO - 978307200) * 1000000000" | bc)
 
 # Query a few recent messages (no phone filter, to ensure we get results)
-QUERY_OUTPUT=$(sqlite3 "$DB_PATH" "
+if QUERY_OUTPUT=$(sqlite3 "$DB_PATH" "
 SELECT
     ROWID,
     COALESCE(text, '') as text,
@@ -57,17 +57,14 @@ FROM message
 WHERE date > $APPLE_ONE_HOUR_AGO
 ORDER BY date DESC
 LIMIT 5;
-" 2>&1) || true
-
-# Check that the query executed without error (even if no results)
-if [ $? -eq 0 ] || [ -z "$QUERY_OUTPUT" ]; then
+" 2>&1); then
     pass "SQL query with guid and thread_originator_guid executes successfully"
 else
     fail "SQL query failed: $QUERY_OUTPUT"
 fi
 
 # Also test the phone-number variant query shape (with JOINs)
-QUERY_OUTPUT_JOINED=$(sqlite3 "$DB_PATH" "
+if QUERY_OUTPUT_JOINED=$(sqlite3 "$DB_PATH" "
 SELECT
     m.ROWID,
     COALESCE(m.text, '') as text,
@@ -87,9 +84,7 @@ WHERE m.is_from_me = 0
     AND m.date > $APPLE_ONE_HOUR_AGO
 ORDER BY m.date DESC
 LIMIT 5;
-" 2>&1) || true
-
-if [ $? -eq 0 ] || [ -z "$QUERY_OUTPUT_JOINED" ]; then
+" 2>&1); then
     pass "Joined SQL query with guid and thread_originator_guid executes successfully"
 else
     fail "Joined SQL query failed: $QUERY_OUTPUT_JOINED"
