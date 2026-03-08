@@ -33,7 +33,9 @@ if [ -n "$PHONE_NUMBER" ]; then
         m.is_from_me,
         m.date,
         h.id as handle_id,
-        c.chat_identifier
+        c.chat_identifier,
+        COALESCE(m.guid, '') as msg_guid,
+        COALESCE(m.thread_originator_guid, '') as thread_originator_guid
     FROM message m
     JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
     JOIN chat c ON cmj.chat_id = c.ROWID
@@ -54,7 +56,10 @@ else
         COALESCE(text, '') as text,
         is_from_me,
         date,
-        '' as handle_id
+        '' as handle_id,
+        '' as chat_identifier,
+        COALESCE(guid, '') as msg_guid,
+        COALESCE(thread_originator_guid, '') as thread_originator_guid
     FROM message
     WHERE is_from_me = 0
         AND date > $APPLE_ONE_HOUR_AGO
@@ -64,15 +69,21 @@ else
 fi
 
 # Execute query and format output
-sqlite3 "$DB_PATH" "$QUERY" | while IFS='|' read -r rowid text is_from_me date handle_id chat_identifier; do
+sqlite3 "$DB_PATH" "$QUERY" | while IFS='|' read -r rowid text is_from_me date handle_id chat_identifier msg_guid thread_originator_guid; do
     readable_date=$(convert_date "$date")
     # Create a unique message ID for tracking
     message_id=$(echo -n "${rowid}_${date}_${text}" | md5)
 
     echo "MSG_ID: $message_id"
     echo "ROWID: $rowid"
+    if [ -n "$msg_guid" ]; then
+        echo "GUID: $msg_guid"
+    fi
     echo "DATE: $readable_date"
     echo "TEXT: $text"
+    if [ -n "$thread_originator_guid" ]; then
+        echo "THREAD_REPLY_TO: $thread_originator_guid"
+    fi
     if [ -n "$handle_id" ]; then
         echo "FROM: $handle_id"
     fi
