@@ -29,15 +29,37 @@ ABS_PATH=$(cd "$(dirname "$FILE_PATH")" && pwd)/$(basename "$FILE_PATH")
 # Messages sandboxes file access — files outside its directory fail with error 25
 STAGING_DIR="$HOME/Library/Messages/Attachments/_outgoing"
 mkdir -p "$STAGING_DIR"
-STAGED_FILE="$STAGING_DIR/$(basename "$ABS_PATH")"
-cp "$ABS_PATH" "$STAGED_FILE"
+
+# Use a unique filename to avoid collisions from concurrent sends or duplicate basenames
+BASENAME="$(basename "$ABS_PATH")"
+EXT=""
+if [[ "$BASENAME" == *.* ]]; then
+    EXT=".${BASENAME##*.}"
+fi
+TMPFILE="$(mktemp "$STAGING_DIR/staged-XXXXXXXX")"
+STAGED_FILE="${TMPFILE}${EXT}"
+# Rename mktemp's file to include the original extension (needed for preview behavior)
+if [ -n "$EXT" ]; then
+    mv "$TMPFILE" "$STAGED_FILE"
+fi
+
+# Copy file into staging; abort if copy fails
+if ! cp "$ABS_PATH" "$STAGED_FILE"; then
+    echo "Error: Failed to stage file for sending"
+    rm -f "$STAGED_FILE" 2>/dev/null
+    exit 1
+fi
+
+# Escape quotes and backslashes for AppleScript (same approach as send-message.sh)
+RECIPIENT_ESCAPED=$(printf '%s' "$RECIPIENT" | sed 's/\\!/!/g' | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+STAGED_FILE_ESCAPED=$(printf '%s' "$STAGED_FILE" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
 
 # Send file via AppleScript
 osascript <<EOF
-set fileToSend to POSIX file "$STAGED_FILE"
+set fileToSend to POSIX file "$STAGED_FILE_ESCAPED"
 tell application "Messages"
     set targetService to 1st account whose service type = iMessage
-    set targetBuddy to participant "$RECIPIENT" of targetService
+    set targetBuddy to participant "$RECIPIENT_ESCAPED" of targetService
     send fileToSend to targetBuddy
 end tell
 EOF
