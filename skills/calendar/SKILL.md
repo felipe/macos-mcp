@@ -82,7 +82,7 @@ Create an event on a writable calendar.
 
 # All-day event
 ./create-event.sh --cal CALENDAR_ID --title "Faro launch target" \
-  --start 2026-04-01 --end 2026-04-01 --all-day
+  --start 2026-04-01 --end 2026-04-02 --all-day
 ```
 
 ### Updating / Deleting

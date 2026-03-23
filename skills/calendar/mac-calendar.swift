@@ -9,6 +9,11 @@ import Foundation
 // Requires: Calendar access permission (TCC prompt on first run)
 
 let store = EKEventStore()
+let isoFormatter: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.timeZone = TimeZone.current
+    return f
+}()
 
 // MARK: - Helpers
 
@@ -49,11 +54,20 @@ func parseDate(_ string: String) -> Date? {
     if let date = formatter.date(from: string) { return date }
     formatter.formatOptions = [.withInternetDateTime]
     if let date = formatter.date(from: string) { return date }
-    // Try date-only
+    // Date-only: treat as local timezone
     let dateOnly = DateFormatter()
     dateOnly.dateFormat = "yyyy-MM-dd"
     dateOnly.timeZone = TimeZone.current
     return dateOnly.date(from: string)
+}
+
+/// Read the next arg value, or exit with error if missing
+func requireArgValue(_ args: [String], _ i: inout Int, flag: String) -> String {
+    i += 1
+    guard i < args.count else {
+        exitWithError("\(flag) requires a value")
+    }
+    return args[i]
 }
 
 func calendarToDict(_ cal: EKCalendar) -> [String: Any] {
@@ -73,8 +87,8 @@ func eventToDict(_ event: EKEvent) -> [String: Any] {
     var dict: [String: Any] = [
         "id": event.eventIdentifier ?? "",
         "title": event.title ?? "",
-        "startDate": ISO8601DateFormatter().string(from: event.startDate),
-        "endDate": ISO8601DateFormatter().string(from: event.endDate),
+        "startDate": isoFormatter.string(from: event.startDate),
+        "endDate": isoFormatter.string(from: event.endDate),
         "isAllDay": event.isAllDay,
         "calendar": event.calendar?.title ?? "",
         "calendarId": event.calendar?.calendarIdentifier ?? ""
@@ -127,13 +141,17 @@ func getEvents(calendarId: String?, from: Date, to: Date) {
 
 func getUpcoming(hours: Int, calendarId: String?) {
     let from = Date()
-    let to = Calendar.current.date(byAdding: .hour, value: hours, to: from)!
+    guard let to = Calendar.current.date(byAdding: .hour, value: hours, to: from) else {
+        exitWithError("Invalid hours value: \(hours)")
+    }
     getEvents(calendarId: calendarId, from: from, to: to)
 }
 
 func searchEvents(query: String, daysBack: Int, calendarId: String?) {
     let to = Date()
-    let from = Calendar.current.date(byAdding: .day, value: -daysBack, to: to)!
+    guard let from = Calendar.current.date(byAdding: .day, value: -daysBack, to: to) else {
+        exitWithError("Invalid days value: \(daysBack)")
+    }
     var calendars: [EKCalendar]? = nil
     if let calId = calendarId,
        let cal = store.calendar(withIdentifier: calId) {
@@ -141,11 +159,11 @@ func searchEvents(query: String, daysBack: Int, calendarId: String?) {
     }
     let predicate = store.predicateForEvents(withStart: from, end: to, calendars: calendars)
     let events = store.events(matching: predicate)
+    let q = query.lowercased()
     let filtered = events.filter { event in
         let title = event.title?.lowercased() ?? ""
         let notes = event.notes?.lowercased() ?? ""
         let location = event.location?.lowercased() ?? ""
-        let q = query.lowercased()
         return title.contains(q) || notes.contains(q) || location.contains(q)
     }
     let result = filtered.map { eventToDict($0) }
@@ -165,8 +183,16 @@ func createEvent(calendarId: String, title: String, startDate: Date, endDate: Da
     event.calendar = calendar
     event.title = title
     event.startDate = startDate
-    event.endDate = endDate
     event.isAllDay = allDay
+
+    // All-day events: EventKit expects endDate to be exclusive (next day)
+    if allDay {
+        let adjustedEnd = max(endDate, Calendar.current.date(byAdding: .day, value: 1, to: startDate) ?? endDate)
+        event.endDate = adjustedEnd
+    } else {
+        event.endDate = endDate
+    }
+
     if let notes = notes { event.notes = notes }
     if let location = location { event.location = location }
 
@@ -269,9 +295,9 @@ Task {
         var i = 1
         while i < args.count {
             switch args[i] {
-            case "--from": i += 1; from = parseDate(args[i])
-            case "--to": i += 1; to = parseDate(args[i])
-            case "--cal": i += 1; calId = args[i]
+            case "--from": from = parseDate(requireArgValue(args, &i, flag: "--from"))
+            case "--to": to = parseDate(requireArgValue(args, &i, flag: "--to"))
+            case "--cal": calId = requireArgValue(args, &i, flag: "--cal")
             default: break
             }
             i += 1
@@ -287,8 +313,10 @@ Task {
         var i = 1
         while i < args.count {
             switch args[i] {
-            case "--hours": i += 1; hours = Int(args[i]) ?? 24
-            case "--cal": i += 1; calId = args[i]
+            case "--hours":
+                let val = requireArgValue(args, &i, flag: "--hours")
+                hours = Int(val) ?? 24
+            case "--cal": calId = requireArgValue(args, &i, flag: "--cal")
             default: break
             }
             i += 1
@@ -303,8 +331,10 @@ Task {
         var i = 2
         while i < args.count {
             switch args[i] {
-            case "--days": i += 1; days = Int(args[i]) ?? 30
-            case "--cal": i += 1; calId = args[i]
+            case "--days":
+                let val = requireArgValue(args, &i, flag: "--days")
+                days = Int(val) ?? 30
+            case "--cal": calId = requireArgValue(args, &i, flag: "--cal")
             default: break
             }
             i += 1
@@ -322,12 +352,12 @@ Task {
         var i = 1
         while i < args.count {
             switch args[i] {
-            case "--cal": i += 1; calId = args[i]
-            case "--title": i += 1; title = args[i]
-            case "--start": i += 1; startStr = args[i]
-            case "--end": i += 1; endStr = args[i]
-            case "--notes": i += 1; notes = args[i]
-            case "--location": i += 1; location = args[i]
+            case "--cal": calId = requireArgValue(args, &i, flag: "--cal")
+            case "--title": title = requireArgValue(args, &i, flag: "--title")
+            case "--start": startStr = requireArgValue(args, &i, flag: "--start")
+            case "--end": endStr = requireArgValue(args, &i, flag: "--end")
+            case "--notes": notes = requireArgValue(args, &i, flag: "--notes")
+            case "--location": location = requireArgValue(args, &i, flag: "--location")
             case "--all-day": allDay = true
             default: break
             }
@@ -351,12 +381,12 @@ Task {
         var i = 1
         while i < args.count {
             switch args[i] {
-            case "--id": i += 1; eventId = args[i]
-            case "--title": i += 1; title = args[i]
-            case "--start": i += 1; startStr = args[i]
-            case "--end": i += 1; endStr = args[i]
-            case "--notes": i += 1; notes = args[i]
-            case "--location": i += 1; location = args[i]
+            case "--id": eventId = requireArgValue(args, &i, flag: "--id")
+            case "--title": title = requireArgValue(args, &i, flag: "--title")
+            case "--start": startStr = requireArgValue(args, &i, flag: "--start")
+            case "--end": endStr = requireArgValue(args, &i, flag: "--end")
+            case "--notes": notes = requireArgValue(args, &i, flag: "--notes")
+            case "--location": location = requireArgValue(args, &i, flag: "--location")
             default: break
             }
             i += 1
@@ -373,7 +403,7 @@ Task {
         var eventId: String?
         var i = 1
         while i < args.count {
-            if args[i] == "--id" { i += 1; eventId = args[i] }
+            if args[i] == "--id" { eventId = requireArgValue(args, &i, flag: "--id") }
             i += 1
         }
         guard let eventId = eventId else {
