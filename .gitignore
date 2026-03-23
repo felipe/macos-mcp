@@ -14,6 +14,10 @@ tmp/
 # Logs
 *.log
 
+# Compiled binaries
+mac-calendar
+mac-launcher
+
 # Editor
 *.swp
 *.swo
