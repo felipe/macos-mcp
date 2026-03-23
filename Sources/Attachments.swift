@@ -31,6 +31,13 @@ func runAttachments(args: [String]) {
         exitWithError("attachments requires --rowid N")
     }
 
+    // Canonicalize output dir and reject path traversal
+    let resolvedOutputDir = NSString(string: outputDir).standardizingPath
+    if resolvedOutputDir.contains("..") {
+        exitWithError("--output-dir must not contain path traversal")
+    }
+    outputDir = resolvedOutputDir
+
     let dbPath = NSString("~/Library/Messages/chat.db").expandingTildeInPath
     var db: OpaquePointer?
     guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil) == SQLITE_OK,
