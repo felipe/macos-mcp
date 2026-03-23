@@ -1,19 +1,21 @@
 {
-  "name": "imessage",
-  "description": "iMessage integration for Claude Code - read messages, send replies, and run autonomous agents via iMessage",
-  "version": "1.0.0",
+  "name": "macos",
+  "description": "macOS system services for Claude Code — iMessage, Calendar, and more",
+  "version": "2.0.0",
   "author": {
     "name": "Felipe Oduardo Sierra"
   },
-  "repository": "https://github.com/felipe/iMessage-Claude-Bridge",
+  "repository": "https://github.com/felipe/macos-mcp",
   "keywords": [
+    "macos",
     "imessage",
+    "calendar",
+    "eventkit",
     "messages",
-    "sms",
-    "chat",
     "automation",
     "daemon",
-    "agent"
+    "agent",
+    "mcp"
   ],
   "license": "MIT"
 }
