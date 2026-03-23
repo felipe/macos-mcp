@@ -14,9 +14,8 @@ tmp/
 # Logs
 *.log
 
-# Compiled binaries
-mac-calendar
-mac-launcher
+# Private knowledge base (symlinked locally)
+Oracle
 
 # Editor
 *.swp
