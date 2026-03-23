@@ -1,130 +1,108 @@
 # macos-mcp
 
-MCP server exposing macOS system services (iMessage, Calendar, more) to AI tools. Also works as a Claude Code plugin.
+Unified macOS system services for AI tools. Single binary, single Full Disk Access grant. Also works as a Claude Code plugin.
 
-## Install (Claude Code Plugin)
+## Install
+
+### Claude Code Plugin
 
 ```bash
 /plugin marketplace add felipe/macos-mcp
 /plugin install macos@macos-mcp
 ```
 
-## Services
+### Standalone
 
-### iMessage
-
-Read, send, and auto-reply to iMessages using shell scripts, SQLite, and AppleScript.
-
-| Script | Description |
-|--------|-------------|
-| `read-messages-db.sh` | Read message history from SQLite database (preferred) |
-| `read-messages.sh` | Read messages via AppleScript (fallback) |
-| `check-new-messages-db.sh` | Check recent incoming messages via SQLite |
-| `check-new-messages.sh` | Check unread message counts via AppleScript |
-| `send-message.sh` | Send to a contact (iMessage first, SMS fallback) |
-| `send-to-chat.sh` | Send to a group chat by chat identifier |
-| `send-file.sh` | Send a file attachment |
-| `list-conversations.sh` | List recent conversations |
-| `get-message-attachments.sh` | Retrieve and process message attachments |
-| `typing-indicator.sh` | Trigger native iMessage typing bubble via System Events |
-
-#### Autonomous Daemon
-
-Background daemon that monitors incoming iMessages from a specific contact and spawns Claude Code agent sessions to respond automatically.
+Pre-built universal binary (arm64 + x86_64) ships in the repo. Or build from source:
 
 ```bash
-# Configure
-cp examples/.env.example ~/.claude-imessage.env
-nano ~/.claude-imessage.env  # Set IMESSAGE_CONTACT_PHONE and IMESSAGE_CONTACT_NAME
-
-# Manage via slash command
-/imessage-daemon start
-/imessage-daemon status
-/imessage-daemon stop
+make  # Requires Xcode Command Line Tools
 ```
 
-See [daemon/README.md](skills/imessage/daemon/README.md) for full documentation.
+Grant Full Disk Access to the `macos-mcp` binary in System Settings > Privacy & Security > Full Disk Access.
 
-### Calendar
-
-Read, create, and search macOS calendar events via EventKit.
+## Usage
 
 ```bash
-# Build the Swift CLI (one time)
-cd skills/calendar
-swiftc -O -o mac-calendar mac-calendar.swift -framework EventKit
+# iMessage
+macos-mcp messages check --phone 4155551234 --since 60
+macos-mcp messages read --phone 4155551234 --limit 10
+macos-mcp messages list-conversations --limit 20
+macos-mcp messages attachments --rowid 12345 --convert-heic
+macos-mcp send message 4155551234 "Hello!"
+macos-mcp send file 4155551234 /path/to/image.png
+macos-mcp send chat "chat123456" "Hello group!"
+macos-mcp typing 4155551234 start
+
+# Calendar
+macos-mcp calendar list
+macos-mcp calendar events --from 2026-03-23 --to 2026-03-24
+macos-mcp calendar upcoming --hours 24
+macos-mcp calendar search "meeting" --days 30
+macos-mcp calendar create --cal CAL_ID --title "Meeting" --start 2026-03-24T14:00:00Z --end 2026-03-24T15:00:00Z
+macos-mcp calendar update --id EVENT_ID --title "New title"
+macos-mcp calendar delete --id EVENT_ID
+
+# FDA process wrapper (for launchd agents)
+macos-mcp launch /path/to/script.sh
 ```
 
-| Script | Description |
-|--------|-------------|
-| `list-calendars.sh` | List all visible calendars (own + shared) |
-| `get-events.sh` | Get events in a date range |
-| `upcoming.sh` | Get upcoming events (default: next 24 hours) |
-| `create-event.sh` | Create an event on a writable calendar |
-| `search-events.sh` | Search events by title, notes, or location |
+All output is JSON to stdout. Errors are JSON to stderr.
 
-Update and delete via `mac-calendar` directly:
+## Autonomous Daemon
+
+Background daemon that monitors incoming iMessages and spawns Claude Code agent sessions to respond.
 
 ```bash
-./mac-calendar update --id EVENT_ID --title "New title"
-./mac-calendar delete --id EVENT_ID
+# Configure via environment variables
+export IMESSAGE_CONTACT_PHONE="4155551234"
+export IMESSAGE_CONTACT_NAME="John Doe"
+
+# Optional: agent persona (SoulSpec convention)
+export MACOS_MCP_AGENT_PATH="/path/to/agent/spec"
+
+# Start
+skills/imessage/daemon/imessage-auto-reply-daemon.sh
 ```
+
+Or manage via launchd — see [daemon/README.md](skills/imessage/daemon/README.md).
 
 ## Two-Account Model
 
-This is designed to run on the **agent's macOS account** — a separate user with its own Apple ID. Not the user's personal account.
+Designed to run on the **agent's macOS account** — a separate user with its own Apple ID.
 
 - **iMessage**: The agent has its own phone number. You text the agent like a contact.
-- **Calendar**: The agent has its own iCloud calendar, shared with the user. Events the agent creates appear on the user's devices. The user shares their calendar with the agent (read-only) so the agent knows what's scheduled.
-
-### Calendar Sharing Setup
-
-1. On the agent's Mac account: create a calendar (e.g., "Mac") in Calendar.app
-2. Right-click the calendar > Share > invite the user's Apple ID
-3. On the user's devices: accept the shared calendar invitation
-4. On the user's account: share their primary calendar with the agent's Apple ID (read-only)
+- **Calendar**: The agent has its own iCloud calendar, shared with the user. The user shares their calendar with the agent (read-only).
 
 ## Requirements
 
 - macOS 13+ (Ventura)
 - Messages app signed in to iMessage
-- Full Disk Access for Terminal (System Settings > Privacy & Security > Full Disk Access)
-- Accessibility permission for Terminal (System Settings > Privacy & Security > Accessibility) — required for typing indicator
-- Calendar access permission — granted on first run of `mac-calendar`
-- `sqlite3`, `osascript`, `sips`, `bc` (all ship with macOS)
-
-## How It Works
-
-- **iMessage reading**: SQLite queries against `~/Library/Messages/chat.db` (preferred), with AppleScript as a fallback
-- **iMessage sending**: AppleScript controlling Messages.app — tries iMessage first, falls back to SMS
-- **Daemon mode**: Polls the database for new messages, spawns autonomous Claude Code sessions to handle them
-- **Typing indicator**: Types into the Messages input field to show the native typing bubble while the agent works
-- **Calendar**: Swift EventKit CLI tool called by bash scripts, outputs JSON
+- Full Disk Access for the `macos-mcp` binary
+- Accessibility permission for Terminal (typing indicator)
+- Calendar access permission (TCC prompt on first run)
 
 ## Project Structure
 
 ```
-.claude-plugin/          # Plugin manifests
-commands/                # Slash commands (/imessage-daemon)
+macos-mcp              # Pre-built universal binary
+Sources/               # Swift source files
+  main.swift           # CLI router
+  Shared.swift         # JSON output, date parsing, helpers
+  Launch.swift         # FDA process wrapper
+  Calendar.swift       # EventKit operations
+  Messages.swift       # SQLite message queries
+  Attachments.swift    # Attachment processing + HEIC conversion
+  Send.swift           # AppleScript wrappers (send, typing)
+Makefile               # Build universal binary
+.claude-plugin/        # Plugin manifests
+commands/              # Slash commands (/imessage-daemon)
 skills/
-  imessage/              # Shell scripts for iMessage operations
-    daemon/              # Auto-reply daemon + FDA launcher
-  calendar/              # EventKit calendar operations
-    mac-calendar.swift   # Swift CLI (build locally)
-    *.sh                 # Bash wrapper scripts
-examples/                # Example configuration files
-tests/                   # Test suite
-```
-
-## Configuration
-
-For daemon mode, create `~/.claude-imessage.env`:
-
-```bash
-export IMESSAGE_CONTACT_PHONE="4155551234"  # Required
-export IMESSAGE_CONTACT_NAME="John Doe"     # Required
-# export IMESSAGE_CONTACT_EMAIL="john@example.com"  # Optional
-# export IMESSAGE_CHECK_INTERVAL="1"                 # Optional (seconds)
+  imessage/
+    daemon/            # Auto-reply daemon
+    SKILL.md
+  calendar/
+    SKILL.md
 ```
 
 ## License
