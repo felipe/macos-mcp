@@ -184,7 +184,7 @@ collect_messages() {
             elif [ -n "$guid" ]; then
                 thread_id="$guid"
             fi
-            log "New message (thread: $thread_id): \"$text\""
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] New message (thread: $thread_id): \"$text\"" >> "$LOG_FILE"
             mark_as_processed "$msg_id"
             echo "${thread_id}|${chat:-$CONTACT_PHONE}|${msg_is_reply}|${text}"
         fi
