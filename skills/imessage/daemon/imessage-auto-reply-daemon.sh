@@ -19,9 +19,9 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+MACOS_MCP="$PROJECT_ROOT/macos-mcp"
 TMP_DIR="${IMESSAGE_TMP_DIR:-$HOME/tmp/imessage}"
 PROCESSED_LOG="$TMP_DIR/processed_imessages.log"
-IMESSAGE_SKILL="$PROJECT_ROOT/skills/imessage"
 LOG_FILE="$TMP_DIR/imessage-auto-reply.log"
 
 # Configuration from environment variables
@@ -34,6 +34,13 @@ DEBOUNCE_SECONDS="${IMESSAGE_DEBOUNCE:-3}"
 # Load environment variables if .env exists
 if [ -f "$PROJECT_ROOT/.env" ]; then
     source "$PROJECT_ROOT/.env"
+fi
+
+# Verify binary exists
+if [ ! -x "$MACOS_MCP" ]; then
+    echo "Error: macos-mcp binary not found at $MACOS_MCP" >&2
+    echo "Build it with: cd $PROJECT_ROOT && make" >&2
+    exit 1
 fi
 
 # Create tmp directory if it doesn't exist
@@ -49,12 +56,12 @@ log() {
     echo "$msg" >> "$LOG_FILE"
 }
 
-# Generate a unique ID for a message based on timestamp and text
+# Generate a unique ID for a message based on rowid, date, and text
 generate_message_id() {
-    local timestamp="$1"
-    local text="$2"
-    local sender="$3"
-    echo -n "${sender}_${timestamp}_${text}" | md5
+    local rowid="$1"
+    local date="$2"
+    local text="$3"
+    echo -n "${rowid}_${date}_${text}" | md5
 }
 
 check_if_processed() {
@@ -67,22 +74,8 @@ mark_as_processed() {
     echo "$message_id" >> "$PROCESSED_LOG"
 }
 
-is_monitored_chat() {
-    local chat_name="$1"
-    # Check if chat name contains contact identifiers
-    if [ -n "$CONTACT_NAME" ] && echo "$chat_name" | grep -qi "$CONTACT_NAME"; then
-        return 0
-    elif [ -n "$CONTACT_PHONE" ] && echo "$chat_name" | grep -q "$CONTACT_PHONE"; then
-        return 0
-    elif [ -n "$CONTACT_EMAIL" ] && echo "$chat_name" | grep -q "$CONTACT_EMAIL"; then
-        return 0
-    fi
-    return 1
-}
-
 is_group_chat() {
     local chat_identifier="$1"
-    # Group chats start with "chat", 1-on-1 chats use phone numbers or email
     if [[ "$chat_identifier" =~ ^chat ]]; then
         return 0
     fi
@@ -129,6 +122,49 @@ is_agent_running() {
     return 1
 }
 
+# Parse JSON messages output into tab-separated lines for bash processing
+# Output: one line per message: msg_id\tguid\ttext\tthread_reply_to\tchat
+parse_messages_json() {
+    python3 -c '
+import json, sys, hashlib
+try:
+    data = json.load(sys.stdin)
+except:
+    sys.exit(0)
+for msg in data.get("messages", []):
+    rowid = str(msg.get("rowid", ""))
+    date = msg.get("date", "")
+    text = msg.get("text", "").replace("\t", " ").replace("\n", " ")
+    guid = msg.get("guid", "")
+    thread = msg.get("thread_reply_to", "")
+    chat = msg.get("chat", "")
+    msg_id = hashlib.md5(f"{rowid}_{date}_{text}".encode()).hexdigest()
+    print(f"{msg_id}\t{guid}\t{text}\t{thread}\t{chat}")
+'
+}
+
+# Collect unprocessed messages from JSON check output
+collect_messages() {
+    local json_output="$1"
+    echo "$json_output" | parse_messages_json | while IFS=$'\t' read -r msg_id guid text thread_reply_to chat; do
+        [ -z "$msg_id" ] && continue
+        [ -z "$text" ] && continue
+        if ! check_if_processed "$msg_id"; then
+            thread_id="default"
+            msg_is_reply=0
+            if [ -n "$thread_reply_to" ]; then
+                thread_id="$thread_reply_to"
+                msg_is_reply=1
+            elif [ -n "$guid" ]; then
+                thread_id="$guid"
+            fi
+            log "New message (thread: $thread_id): \"$text\""
+            mark_as_processed "$msg_id"
+            echo "${thread_id}|${chat:-$CONTACT_PHONE}|${msg_is_reply}|${text}"
+        fi
+    done
+}
+
 start_autonomous_agent() {
     local initial_message="$1"
     local chat_identifier="$2"
@@ -147,8 +183,8 @@ start_autonomous_agent() {
 
     log "Starting autonomous agent session ($conv_type, thread: $thread_id)..."
 
-    # Get recent conversation context
-    local conversation=$("$IMESSAGE_SKILL/read-messages-db.sh" "$CONTACT_PHONE" --limit 10 2>&1)
+    # Get recent conversation context (JSON output)
+    local conversation=$("$MACOS_MCP" messages read --phone "$CONTACT_PHONE" --limit 10 2>&1)
 
     # Check if we have an existing conversation to resume
     local resume_flag=""
@@ -179,26 +215,25 @@ IMPORTANT CONTEXT:
 
 AVAILABLE SKILLS:
 1. send-imessage: Send messages to $CONTACT_NAME at any time
-   - Usage: echo \"message\" | $IMESSAGE_SKILL/send-message.sh \"$CONTACT_PHONE\"
-   - For group chats: echo \"message\" | $IMESSAGE_SKILL/send-to-chat.sh \"${chat_identifier}\"
+   - Usage: $MACOS_MCP send message \"$CONTACT_PHONE\" \"your message here\"
+   - For group chats: $MACOS_MCP send chat \"${chat_identifier}\" \"your message here\"
 
 2. check-new-imessages: Check if $CONTACT_NAME sent new messages
-   - Usage: $IMESSAGE_SKILL/check-new-messages-db.sh \"$CONTACT_PHONE\"
-   - Returns new messages from last hour, or empty if none
+   - Usage: $MACOS_MCP messages check --phone \"$CONTACT_PHONE\"
+   - Returns JSON with new messages from last hour, or empty array if none
 
-3. view-attachment: When a message has attachments (shown as ATTACHMENT: lines or ￼ character in text)
+3. view-attachment: When a message has attachments (shown in attachments array or ￼ character in text)
    - Use the Read tool to view image files directly (PNG, JPG, HEIC, etc.)
-   - The file path will be in the ATTACHMENT line from check-new-messages output
-   - You can also query attachments manually: sqlite3 ~/Library/Messages/chat.db \"SELECT a.filename, a.mime_type FROM attachment a JOIN message_attachment_join maj ON a.ROWID = maj.attachment_id WHERE maj.message_id = <ROWID>;\"
+   - Get attachment paths: $MACOS_MCP messages attachments --rowid <ROWID>
+   - Convert HEIC: $MACOS_MCP messages attachments --rowid <ROWID> --convert-heic
 
 4. send-file: Send images or files via iMessage
-   - Usage: $IMESSAGE_SKILL/send-file.sh \"$CONTACT_PHONE\" \"/path/to/image.png\"
+   - Usage: $MACOS_MCP send file \"$CONTACT_PHONE\" \"/path/to/image.png\"
    - Supports any file type (images, PDFs, etc.)
-   - Use this when you need to share screenshots, generated images, or any file
 
 5. All other skills available in your Claude Code environment
 
-RECENT CONVERSATION:
+RECENT CONVERSATION (JSON):
 ${conversation}
 
 YOUR AUTONOMOUS AGENT WORKFLOW:
@@ -264,7 +299,7 @@ IMPORTANT RULES:
         (
             while kill -0 "$agent_pid" 2>/dev/null; do
                 sleep 30
-                "$IMESSAGE_SKILL/typing-indicator.sh" "$CONTACT_PHONE" keepalive > /dev/null 2>&1 || true
+                "$MACOS_MCP" typing "$CONTACT_PHONE" keepalive > /dev/null 2>&1 || true
             done
         ) &
         local keepalive_pid=$!
@@ -274,7 +309,7 @@ IMPORTANT RULES:
 
         # Stop keepalive loop and clear typing indicator
         kill "$keepalive_pid" 2>/dev/null; wait "$keepalive_pid" 2>/dev/null || true
-        "$IMESSAGE_SKILL/typing-indicator.sh" "$CONTACT_PHONE" stop > /dev/null 2>&1 || true
+        "$MACOS_MCP" typing "$CONTACT_PHONE" stop > /dev/null 2>&1 || true
 
         echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Typing indicator cleared (thread: $thread_id)" >> "$LOG_FILE"
 
@@ -297,45 +332,24 @@ log "iMessage Auto-Reply Daemon Starting"
 log "=========================================="
 log "Contact: $CONTACT_NAME ($CONTACT_PHONE)"
 log "Check interval: ${CHECK_INTERVAL}s"
+log "Binary: $MACOS_MCP"
 log "Tmp directory: $TMP_DIR"
 log "Log file: $LOG_FILE"
 log ""
 
 while true; do
-    # Check for new messages
-    new_messages=$("$IMESSAGE_SKILL/check-new-messages-db.sh" "$CONTACT_PHONE" 2>/dev/null)
+    # Check for new messages (JSON output)
+    new_messages=$("$MACOS_MCP" messages check --phone "$CONTACT_PHONE" --since 60 2>/dev/null)
 
-    if [ -n "$new_messages" ]; then
-        # Parse and collect unprocessed messages
-        # Each entry: thread_id|chat|is_reply|text
+    # Quick check: any messages at all?
+    msg_count=$(echo "$new_messages" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("messages",[])))' 2>/dev/null || echo "0")
+
+    if [ "$msg_count" -gt 0 ]; then
+        # Parse JSON and collect unprocessed messages
         collected=()
-        while IFS= read -r line; do
-            case "$line" in
-                "MSG_ID: "*) current_msg_id="${line#MSG_ID: }" ;;
-                "GUID: "*) current_guid="${line#GUID: }" ;;
-                "TEXT: "*) current_text="${line#TEXT: }" ;;
-                "THREAD_REPLY_TO: "*) current_thread_reply_to="${line#THREAD_REPLY_TO: }" ;;
-                "CHAT: "*) current_chat="${line#CHAT: }" ;;
-                "---")
-                    if [ -n "$current_msg_id" ] && [ -n "$current_text" ]; then
-                        if ! check_if_processed "$current_msg_id"; then
-                            thread_id="default"
-                            msg_is_reply=0
-                            if [ -n "$current_thread_reply_to" ]; then
-                                thread_id="$current_thread_reply_to"
-                                msg_is_reply=1
-                            elif [ -n "$current_guid" ]; then
-                                thread_id="$current_guid"
-                            fi
-                            log "New message (thread: $thread_id): \"$current_text\""
-                            mark_as_processed "$current_msg_id"
-                            collected+=("${thread_id}|${current_chat:-$CONTACT_PHONE}|${msg_is_reply}|${current_text}")
-                        fi
-                    fi
-                    current_msg_id=""; current_guid=""; current_text=""; current_thread_reply_to=""; current_chat=""
-                    ;;
-            esac
-        done <<< "$new_messages"
+        while IFS= read -r entry; do
+            [ -n "$entry" ] && collected+=("$entry")
+        done < <(collect_messages "$new_messages")
 
         # If we collected new messages, debounce to catch rapid follow-ups
         if [ ${#collected[@]} -gt 0 ]; then
@@ -343,36 +357,10 @@ while true; do
             sleep "$DEBOUNCE_SECONDS"
 
             # Check for more messages that arrived during debounce
-            more_messages=$("$IMESSAGE_SKILL/check-new-messages-db.sh" "$CONTACT_PHONE" 2>/dev/null)
-            if [ -n "$more_messages" ]; then
-                while IFS= read -r line; do
-                    case "$line" in
-                        "MSG_ID: "*) current_msg_id="${line#MSG_ID: }" ;;
-                        "GUID: "*) current_guid="${line#GUID: }" ;;
-                        "TEXT: "*) current_text="${line#TEXT: }" ;;
-                        "THREAD_REPLY_TO: "*) current_thread_reply_to="${line#THREAD_REPLY_TO: }" ;;
-                        "CHAT: "*) current_chat="${line#CHAT: }" ;;
-                        "---")
-                            if [ -n "$current_msg_id" ] && [ -n "$current_text" ]; then
-                                if ! check_if_processed "$current_msg_id"; then
-                                    thread_id="default"
-                                    msg_is_reply=0
-                                    if [ -n "$current_thread_reply_to" ]; then
-                                        thread_id="$current_thread_reply_to"
-                                        msg_is_reply=1
-                                    elif [ -n "$current_guid" ]; then
-                                        thread_id="$current_guid"
-                                    fi
-                                    log "Additional message during debounce (thread: $thread_id): \"$current_text\""
-                                    mark_as_processed "$current_msg_id"
-                                    collected+=("${thread_id}|${current_chat:-$CONTACT_PHONE}|${msg_is_reply}|${current_text}")
-                                fi
-                            fi
-                            current_msg_id=""; current_guid=""; current_text=""; current_thread_reply_to=""; current_chat=""
-                            ;;
-                    esac
-                done <<< "$more_messages"
-            fi
+            more_messages=$("$MACOS_MCP" messages check --phone "$CONTACT_PHONE" --since 60 2>/dev/null)
+            while IFS= read -r entry; do
+                [ -n "$entry" ] && collected+=("$entry")
+            done < <(collect_messages "$more_messages")
 
             # Group collected messages by thread and launch agents
             # Reply-thread messages keep their own thread ID; standalone messages
@@ -418,7 +406,7 @@ while true; do
                 t_chat=$(cat "$batch_dir/${safe_use_id}.chat")
                 t_texts=$(cat "$txt_file")
                 if ! is_agent_running "$t_id"; then
-                    "$IMESSAGE_SKILL/typing-indicator.sh" "$CONTACT_PHONE" start > /dev/null 2>&1 || log "  Typing indicator failed, continuing"
+                    "$MACOS_MCP" typing "$CONTACT_PHONE" start > /dev/null 2>&1 || log "  Typing indicator failed, continuing"
                     start_autonomous_agent "$t_texts" "$t_chat" "$t_id"
                 else
                     log "  Agent already running for thread $t_id, skipping"
