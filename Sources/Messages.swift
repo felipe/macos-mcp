@@ -138,7 +138,7 @@ private func messagesCheck(phone: String?, sinceMinutes: Int) {
             """
         messages = query(db, sql: sql) { stmt in
             let pattern = "%\(phone)%"
-            sqlite3_bind_text(stmt, 1, (pattern as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 1, (pattern as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
             sqlite3_bind_int64(stmt, 2, sinceAppleNanos)
         }
     } else {
@@ -218,7 +218,7 @@ private func messagesRead(phone: String?, limit: Int) {
             """
         messages = query(db, sql: sql) { stmt in
             let pattern = "%\(phone)%"
-            sqlite3_bind_text(stmt, 1, (pattern as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 1, (pattern as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
             sqlite3_bind_int64(stmt, 2, Int64(limit))
         }
     } else {

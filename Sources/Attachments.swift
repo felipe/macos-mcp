@@ -83,13 +83,13 @@ func runAttachments(args: [String]) {
         }
 
         let attrs = try? fm.attributesOfItem(atPath: filename)
-        let fileSize = attrs?[.size] as? Int64 ?? 0
+        let fileSize = (attrs?[.size] as? Int64) ?? 0
 
         var att: [String: Any] = [
             "original_path": filename,
             "mime_type": mimeType,
             "transfer_name": transferName,
-            "file_size": fileSize
+            "file_size": NSNumber(value: fileSize)
         ]
 
         let isImage = mimeType.hasPrefix("image/")

@@ -27,10 +27,10 @@ private func calendarToDict(_ cal: EKCalendar) -> [String: Any] {
         "title": cal.title,
         "type": calendarTypeName(cal.type),
         "source": cal.source?.title ?? "unknown",
-        "color": cal.cgColor?.components?.map { $0 } ?? [],
-        "allowsModify": cal.allowsContentModifications,
-        "isSubscribed": cal.isSubscribed,
-        "isImmutable": cal.isImmutable
+        "color": cal.cgColor?.components?.map { NSNumber(value: $0) } ?? [],
+        "allowsModify": NSNumber(value: cal.allowsContentModifications),
+        "isSubscribed": NSNumber(value: cal.isSubscribed),
+        "isImmutable": NSNumber(value: cal.isImmutable)
     ]
 }
 
@@ -40,14 +40,14 @@ private func eventToDict(_ event: EKEvent) -> [String: Any] {
         "title": event.title ?? "",
         "startDate": isoFormatter.string(from: event.startDate),
         "endDate": isoFormatter.string(from: event.endDate),
-        "isAllDay": event.isAllDay,
+        "isAllDay": NSNumber(value: event.isAllDay),
         "calendar": event.calendar?.title ?? "",
         "calendarId": event.calendar?.calendarIdentifier ?? ""
     ]
     if let location = event.location { dict["location"] = location }
     if let notes = event.notes { dict["notes"] = notes }
     if let url = event.url { dict["url"] = url.absoluteString }
-    if event.hasRecurrenceRules { dict["isRecurring"] = true }
+    if event.hasRecurrenceRules { dict["isRecurring"] = NSNumber(value: true) }
     if let organizer = event.organizer?.name { dict["organizer"] = organizer }
     dict["status"] = switch event.status {
         case .none: "none"
