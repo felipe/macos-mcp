@@ -30,6 +30,7 @@ CONTACT_PHONE="${IMESSAGE_CONTACT_PHONE:?Error: IMESSAGE_CONTACT_PHONE environme
 CONTACT_NAME="${IMESSAGE_CONTACT_NAME:?Error: IMESSAGE_CONTACT_NAME environment variable is required}"
 CHECK_INTERVAL="${IMESSAGE_CHECK_INTERVAL:-1}"
 DEBOUNCE_SECONDS="${IMESSAGE_DEBOUNCE:-3}"
+AGENT_SPEC_PATH="${MACOS_MCP_AGENT_PATH:-}"
 
 # Load environment variables if .env exists
 if [ -f "$PROJECT_ROOT/.env" ]; then
@@ -55,6 +56,31 @@ log() {
     echo "$msg"
     echo "$msg" >> "$LOG_FILE"
 }
+
+# Load agent persona from SoulSpec files (SOUL.md, IDENTITY.md, USER.md)
+# Returns empty string if MACOS_MCP_AGENT_PATH is not set
+load_agent_spec() {
+    [ -z "$AGENT_SPEC_PATH" ] && return
+    [ ! -d "$AGENT_SPEC_PATH" ] && return
+
+    local spec=""
+    for file in IDENTITY.md SOUL.md USER.md; do
+        if [ -f "$AGENT_SPEC_PATH/$file" ]; then
+            spec="${spec}
+--- ${file} ---
+$(cat "$AGENT_SPEC_PATH/$file")
+"
+        fi
+    done
+
+    if [ -n "$spec" ]; then
+        echo "
+AGENT PERSONA:
+${spec}"
+    fi
+}
+
+AGENT_SPEC="$(load_agent_spec)"
 
 # Generate a unique ID for a message based on rowid, date, and text
 generate_message_id() {
@@ -206,7 +232,8 @@ start_autonomous_agent() {
     fi
 
     # Create autonomous agent prompt
-    local agent_prompt="You are $CONTACT_NAME's personal iMessage assistant running in an autonomous agent session.
+    local agent_prompt="${AGENT_SPEC}
+You are $CONTACT_NAME's personal iMessage assistant running in an autonomous agent session.
 
 IMPORTANT CONTEXT:
 - You are in a ${conv_type} conversation
