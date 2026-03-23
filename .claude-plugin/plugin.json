@@ -1,7 +1,7 @@
 {
   "name": "macos",
   "description": "macOS system services for Claude Code — iMessage, Calendar, and more",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "author": {
     "name": "Felipe Oduardo Sierra"
   },
