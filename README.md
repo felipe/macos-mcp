@@ -43,6 +43,10 @@ macos-mcp calendar create --cal CAL_ID --title "Meeting" --start 2026-03-24T14:0
 macos-mcp calendar update --id EVENT_ID --title "New title"
 macos-mcp calendar delete --id EVENT_ID
 
+# iCloud file sync (for launchd agents)
+macos-mcp icloud sync --source "My Vault" --cache ~/.local/share/myapp/cache --files "file1.md,file2.yml"
+macos-mcp icloud sync --source "My Vault" --cache /tmp/cache --files "data.yml" -- /path/to/script.sh
+
 # FDA process wrapper (for launchd agents)
 macos-mcp launch /path/to/script.sh
 ```
@@ -90,6 +94,7 @@ Sources/               # Swift source files
   main.swift           # CLI router
   Shared.swift         # JSON output, date parsing, helpers
   Launch.swift         # FDA process wrapper
+  ICloud.swift         # iCloud Drive file sync
   Calendar.swift       # EventKit operations
   Messages.swift       # SQLite message queries
   Attachments.swift    # Attachment processing + HEIC conversion
