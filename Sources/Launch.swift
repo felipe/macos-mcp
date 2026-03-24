@@ -10,16 +10,13 @@ func runLaunch(args: [String]) -> Never {
         exitWithError("launch requires a command")
     }
 
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/bin/bash")
-    process.arguments = args
-    process.environment = ProcessInfo.processInfo.environment
+    // Use execv to replace this process with bash.
+    // The child inherits our PID so launchd signals reach it directly,
+    // preventing orphaned processes on daemon restart.
+    let argv = ["/bin/bash"] + args
+    let cArgs = argv.map { strdup($0) } + [nil]
+    execv("/bin/bash", cArgs)
 
-    do {
-        try process.run()
-        process.waitUntilExit()
-        exit(process.terminationStatus)
-    } catch {
-        exitWithError("launch failed: \(error.localizedDescription)")
-    }
+    // execv only returns on failure
+    exitWithError("launch exec failed: \(String(cString: strerror(errno)))")
 }
