@@ -56,7 +56,13 @@ private func runICloudSync(args: [String]) {
     }
 
     let home = resolveHome()
-    let files = filesArg.split(separator: ",").map(String.init)
+    let files = filesArg.split(separator: ",")
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .filter { !$0.isEmpty }
+
+    if files.isEmpty {
+        exitWithError("icloud sync requires a non-empty --files list")
+    }
     let sourceBase = "\(home)/\(iCloudBase)/\(source)"
     let fm = FileManager.default
 
@@ -84,6 +90,19 @@ private func runICloudSync(args: [String]) {
 
     fputs("icloud-sync: \(synced) synced, \(failed.count) failed\n", stderr)
 
+    // If command provided after --, exec into it (skip JSON — execv replaces the process)
+    if !execArgs.isEmpty {
+        if !failed.isEmpty {
+            fputs("icloud-sync: aborting exec due to sync failures\n", stderr)
+            exit(1)
+        }
+        let argv = ["/bin/bash"] + execArgs
+        let cArgs = argv.map { strdup($0) } + [nil]
+        execv("/bin/bash", cArgs)
+        exitWithError("icloud sync exec failed: \(String(cString: strerror(errno)))")
+    }
+
+    // Standalone mode — print JSON result
     var result: [String: Any] = [
         "synced": NSNumber(value: synced),
         "failed": NSNumber(value: failed.count),
@@ -93,14 +112,6 @@ private func runICloudSync(args: [String]) {
         result["failedFiles"] = failed
     }
     printJSON(result)
-
-    // If command provided after --, exec into it
-    if !execArgs.isEmpty {
-        let argv = ["/bin/bash"] + execArgs
-        let cArgs = argv.map { strdup($0) } + [nil]
-        execv("/bin/bash", cArgs)
-        exitWithError("icloud sync exec failed: \(String(cString: strerror(errno)))")
-    }
 
     exit(failed.isEmpty ? 0 : 1)
 }
