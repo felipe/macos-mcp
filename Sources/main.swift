@@ -10,6 +10,12 @@ switch command {
 case "launch":
     runLaunch(args: Array(args.dropFirst()))
 
+case "icloud":
+    guard args.count >= 2 else {
+        exitWithError("icloud requires a subcommand: sync")
+    }
+    runICloud(subcommand: args[1], args: Array(args.dropFirst(2)))
+
 case "calendar":
     guard args.count >= 2 else {
         exitWithError("calendar requires a subcommand: list|events|upcoming|search|create|update|delete")
@@ -50,6 +56,7 @@ func printUsage() -> Never {
 
     Commands:
       launch <command> [args...]              Run command with inherited FDA permissions
+      icloud <subcommand> [args...]           iCloud Drive file operations
       calendar <subcommand> [args...]         Calendar operations via EventKit
       messages <subcommand> [args...]         iMessage database operations
       send <subcommand> [args...]             Send messages via AppleScript
@@ -74,6 +81,10 @@ func printUsage() -> Never {
       message <contact> [text]                Send iMessage (falls back to SMS)
       file <contact> <path>                   Send file attachment
       chat <chat-id> [text]                   Send to group chat
+
+    iCloud subcommands:
+      sync --source DIR --cache DIR --files F1,F2 [-- cmd args...]
+                                              Sync iCloud files to local cache, optionally exec command
 
     Dates: ISO 8601 (2026-03-23T14:00:00Z) or date-only (2026-03-23)
     Output: JSON to stdout, errors as JSON to stderr
