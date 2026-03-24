@@ -17,7 +17,9 @@ private func runAppleScript(_ script: String) -> (output: String, exitCode: Int3
 /// Run AppleScript in-process via NSAppleScript so the macos-mcp binary's
 /// own Accessibility TCC grant applies (required for System Events keystrokes).
 private func runAppleScriptInProcess(_ script: String) -> (output: String, exitCode: Int32) {
-    let appleScript = NSAppleScript(source: script)!
+    guard let appleScript = NSAppleScript(source: script) else {
+        return ("Failed to compile AppleScript", 1)
+    }
     var errorInfo: NSDictionary?
     let result = appleScript.executeAndReturnError(&errorInfo)
     if let error = errorInfo {

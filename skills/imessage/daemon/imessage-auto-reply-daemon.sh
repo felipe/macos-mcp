@@ -18,8 +18,8 @@ unset CLAUDECODE 2>/dev/null || true
 # Note: not using set -e — the daemon loop must survive transient errors
 # from message checks, agent launches, and typing indicator calls.
 
-# Exit when parent (macos-mcp launch) dies so launchd restarts don't leave orphans.
-PARENT_PID=$PPID
+# Clean exit on signals so launchd can restart us properly.
+# With execv in Launch.swift, launchd owns this bash process directly.
 trap 'exit 0' TERM INT HUP
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
