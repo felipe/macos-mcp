@@ -1,7 +1,9 @@
 import Foundation
 
-// MARK: - osascript Helper
+// MARK: - AppleScript Helpers
 
+/// Run AppleScript via osascript subprocess (used for Messages.app commands
+/// that don't require Accessibility).
 private func runAppleScript(_ script: String) -> (output: String, exitCode: Int32) {
     let result = runProcess("/usr/bin/osascript", arguments: ["-e", script])
     let output = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -10,6 +12,21 @@ private func runAppleScript(_ script: String) -> (output: String, exitCode: Int3
         return (err.isEmpty ? output : err, result.exitCode)
     }
     return (output, 0)
+}
+
+/// Run AppleScript in-process via NSAppleScript so the macos-mcp binary's
+/// own Accessibility TCC grant applies (required for System Events keystrokes).
+private func runAppleScriptInProcess(_ script: String) -> (output: String, exitCode: Int32) {
+    guard let appleScript = NSAppleScript(source: script) else {
+        return ("Failed to compile AppleScript", 1)
+    }
+    var errorInfo: NSDictionary?
+    let result = appleScript.executeAndReturnError(&errorInfo)
+    if let error = errorInfo {
+        let msg = error[NSAppleScript.errorMessage] as? String ?? "Unknown AppleScript error"
+        return (msg, 1)
+    }
+    return (result.stringValue ?? "", 0)
 }
 
 // MARK: - Send Message
@@ -150,7 +167,7 @@ func runTyping(args: [String]) {
             end tell
         end tell
         """
-        let (output, exitCode) = runAppleScript(script)
+        let (output, exitCode) = runAppleScriptInProcess(script)
         if exitCode != 0 {
             exitWithError("Failed to start typing indicator: \(output)")
         }
@@ -167,7 +184,7 @@ func runTyping(args: [String]) {
             end tell
         end tell
         """
-        let (output, exitCode) = runAppleScript(script)
+        let (output, exitCode) = runAppleScriptInProcess(script)
         if exitCode != 0 {
             exitWithError("Failed to stop typing indicator: \(output)")
         }
@@ -184,7 +201,7 @@ func runTyping(args: [String]) {
             end tell
         end tell
         """
-        let (output, exitCode) = runAppleScript(script)
+        let (output, exitCode) = runAppleScriptInProcess(script)
         if exitCode != 0 {
             exitWithError("Failed to refresh typing indicator: \(output)")
         }

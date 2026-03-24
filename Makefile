@@ -13,6 +13,7 @@ $(BINARY): $(SOURCES)
 	swiftc $(SWIFTFLAGS) -target x86_64-apple-macosx13.0 $(FRAMEWORKS) $(LIBS) $(SOURCES) -o $(BINARY)-x86_64
 	lipo -create $(BINARY)-arm64 $(BINARY)-x86_64 -output $(BINARY)
 	rm -f $(BINARY)-arm64 $(BINARY)-x86_64
+	codesign --force --sign - --identifier "com.felipe.macos-mcp" $(BINARY)
 
 clean:
 	rm -f $(BINARY) $(BINARY)-arm64 $(BINARY)-x86_64

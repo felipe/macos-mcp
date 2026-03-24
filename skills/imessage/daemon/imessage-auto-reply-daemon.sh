@@ -15,7 +15,12 @@
 # Allow running from within a Claude Code session or standalone
 unset CLAUDECODE 2>/dev/null || true
 
-set -e
+# Note: not using set -e — the daemon loop must survive transient errors
+# from message checks, agent launches, and typing indicator calls.
+
+# Clean exit on signals so launchd can restart us properly.
+# With execv in Launch.swift, launchd owns this bash process directly.
+trap 'exit 0' TERM INT HUP
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -57,20 +62,20 @@ log() {
     echo "$msg" >> "$LOG_FILE"
 }
 
-# Load agent persona from SoulSpec files (SOUL.md, IDENTITY.md, USER.md)
+# Load agent persona from spec directory (all .md files)
 # Returns empty string if MACOS_MCP_AGENT_PATH is not set
 load_agent_spec() {
     [ -z "$AGENT_SPEC_PATH" ] && return
     [ ! -d "$AGENT_SPEC_PATH" ] && return
 
     local spec=""
-    for file in IDENTITY.md SOUL.md USER.md; do
-        if [ -f "$AGENT_SPEC_PATH/$file" ]; then
-            spec="${spec}
---- ${file} ---
-$(cat "$AGENT_SPEC_PATH/$file")
+    for file in "$AGENT_SPEC_PATH"/*.md; do
+        [ -f "$file" ] || continue
+        local basename=$(basename "$file")
+        spec="${spec}
+--- ${basename} ---
+$(cat "$file")
 "
-        fi
     done
 
     if [ -n "$spec" ]; then
