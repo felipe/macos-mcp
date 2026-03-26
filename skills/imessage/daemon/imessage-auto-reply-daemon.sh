@@ -10,6 +10,7 @@
 # - IMESSAGE_CONTACT_NAME: Display name of the contact (required)
 # - IMESSAGE_CHECK_INTERVAL: How often to check for new messages in seconds (default: 1)
 # - IMESSAGE_DEBOUNCE: Seconds to wait for rapid follow-up messages before launching agent (default: 3)
+# - IMESSAGE_AGENT_TIMEOUT: Max seconds an agent can run before being killed (default: 600)
 #
 
 # Allow running from within a Claude Code session or standalone
@@ -35,6 +36,7 @@ CONTACT_PHONE="${IMESSAGE_CONTACT_PHONE:?Error: IMESSAGE_CONTACT_PHONE environme
 CONTACT_NAME="${IMESSAGE_CONTACT_NAME:?Error: IMESSAGE_CONTACT_NAME environment variable is required}"
 CHECK_INTERVAL="${IMESSAGE_CHECK_INTERVAL:-1}"
 DEBOUNCE_SECONDS="${IMESSAGE_DEBOUNCE:-3}"
+AGENT_TIMEOUT="${IMESSAGE_AGENT_TIMEOUT:-600}"
 AGENT_SPEC_PATH="${MACOS_MCP_AGENT_PATH:-}"
 
 # Load environment variables if .env exists
@@ -143,10 +145,11 @@ is_agent_running() {
     local pid_file=$(get_thread_pid_file "$thread_id")
     if [ -f "$pid_file" ]; then
         local pid=$(cat "$pid_file")
-        if ps -p "$pid" > /dev/null 2>&1; then
+        # Verify PID is alive AND is actually a claude process (guards against PID reuse)
+        if ps -p "$pid" -o comm= 2>/dev/null | grep -q claude; then
             return 0
         else
-            # PID file exists but process is dead, clean up
+            # PID file is stale — process dead or PID reused by unrelated process
             rm -f "$pid_file"
         fi
     fi
@@ -336,8 +339,23 @@ IMPORTANT RULES:
         ) &
         local keepalive_pid=$!
 
-        # Wait for agent to finish
+        # Wait for agent to finish, with timeout to prevent hung agents
+        # from blocking the thread indefinitely
+        (
+            sleep "$AGENT_TIMEOUT"
+            if kill -0 "$agent_pid" 2>/dev/null; then
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Agent timed out after ${AGENT_TIMEOUT}s, killing PID $agent_pid (thread: $thread_id)" >> "$LOG_FILE"
+                kill "$agent_pid" 2>/dev/null
+                sleep 2
+                kill -9 "$agent_pid" 2>/dev/null
+            fi
+        ) &
+        local timeout_pid=$!
+
         wait "$agent_pid" 2>/dev/null || true
+
+        # Cancel timeout watchdog
+        kill "$timeout_pid" 2>/dev/null; wait "$timeout_pid" 2>/dev/null || true
 
         # Stop keepalive loop and clear typing indicator
         kill "$keepalive_pid" 2>/dev/null; wait "$keepalive_pid" 2>/dev/null || true
