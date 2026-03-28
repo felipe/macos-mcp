@@ -38,6 +38,8 @@ CHECK_INTERVAL="${IMESSAGE_CHECK_INTERVAL:-1}"
 DEBOUNCE_SECONDS="${IMESSAGE_DEBOUNCE:-3}"
 AGENT_TIMEOUT="${IMESSAGE_AGENT_TIMEOUT:-600}"
 AGENT_SPEC_PATH="${MACOS_MCP_AGENT_PATH:-}"
+AGENT_RUNNER="$SCRIPT_DIR/agent-runner.py"
+AGENT_PYTHON="$SCRIPT_DIR/.venv/bin/python3"
 
 # Load environment variables if .env exists
 if [ -f "$PROJECT_ROOT/.env" ]; then
@@ -64,30 +66,7 @@ log() {
     echo "$msg" >> "$LOG_FILE"
 }
 
-# Load agent persona from spec directory (all .md files)
-# Returns empty string if MACOS_MCP_AGENT_PATH is not set
-load_agent_spec() {
-    [ -z "$AGENT_SPEC_PATH" ] && return
-    [ ! -d "$AGENT_SPEC_PATH" ] && return
-
-    local spec=""
-    for file in "$AGENT_SPEC_PATH"/*.md; do
-        [ -f "$file" ] || continue
-        local basename=$(basename "$file")
-        spec="${spec}
---- ${basename} ---
-$(cat "$file")
-"
-    done
-
-    if [ -n "$spec" ]; then
-        echo "
-AGENT PERSONA:
-${spec}"
-    fi
-}
-
-AGENT_SPEC="$(load_agent_spec)"
+# Agent spec loading moved to agent-runner.py
 
 # Generate a unique ID for a message based on rowid, date, and text
 generate_message_id() {
@@ -145,8 +124,8 @@ is_agent_running() {
     local pid_file=$(get_thread_pid_file "$thread_id")
     if [ -f "$pid_file" ]; then
         local pid=$(cat "$pid_file")
-        # Verify PID is alive AND is actually a claude process (guards against PID reuse)
-        if ps -p "$pid" -o comm= 2>/dev/null | grep -q claude; then
+        # Verify PID is alive AND is actually a claude/python process (guards against PID reuse)
+        if ps -p "$pid" -o comm= 2>/dev/null | grep -qE 'claude|python'; then
             return 0
         else
             # PID file is stale — process dead or PID reused by unrelated process
@@ -205,12 +184,10 @@ start_autonomous_agent() {
     local chat_identifier="$2"
     local thread_id="${3:-default}"
 
-    # Get per-thread file paths
     local pid_file=$(get_thread_pid_file "$thread_id")
     local conversation_id_file=$(get_thread_conversation_file "$thread_id")
     local agent_log=$(get_thread_agent_log "$thread_id")
 
-    # Determine conversation type
     local conv_type="1-on-1"
     if is_group_chat "$chat_identifier"; then
         conv_type="group chat"
@@ -218,209 +195,94 @@ start_autonomous_agent() {
 
     log "Starting autonomous agent session ($conv_type, thread: $thread_id)..."
 
-    # Get recent conversation context (JSON output)
-    local conversation=$("$MACOS_MCP" messages read --phone "$CONTACT_PHONE" --limit 10 2>&1)
-
-    # Check if we have an existing conversation to resume
-    local resume_flag=""
+    # Build conversation-id flag for resume
+    local conv_id_flag=""
     if [ -f "$conversation_id_file" ]; then
-        local conv_id=$(cat "$conversation_id_file")
-        resume_flag="-r $conv_id"
-        log "  Resuming conversation: $conv_id (thread: $thread_id)"
+        conv_id_flag="--conversation-id $(cat "$conversation_id_file")"
+        log "  Resuming conversation (thread: $thread_id)"
     else
         log "  Starting new conversation for thread: $thread_id"
     fi
 
-    # Build thread context for the prompt
-    local thread_context=""
-    if [ "$thread_id" != "default" ]; then
-        thread_context="
-- THREAD CONTEXT: This message is part of an iMessage reply thread (thread ID: ${thread_id})
-- Stay focused on the topic of this thread
-- Your response will appear in this specific reply thread"
-    fi
+    # Build agent spec flag
+    local spec_flag=""
+    [ -n "$AGENT_SPEC_PATH" ] && spec_flag="--agent-spec-path $AGENT_SPEC_PATH"
 
-    # Create autonomous agent prompt
-    local agent_prompt="${AGENT_SPEC}
-You are $CONTACT_NAME's personal iMessage assistant running in an autonomous agent session.
-
-IMPORTANT CONTEXT:
-- You are in a ${conv_type} conversation
-- Chat identifier: ${chat_identifier}${thread_context}
-- $CONTACT_NAME just sent: \"${initial_message}\"
-
-AVAILABLE SKILLS:
-1. send-imessage: Send messages to $CONTACT_NAME at any time
-   - Usage: $MACOS_MCP send message \"$CONTACT_PHONE\" \"your message here\"
-   - For group chats: $MACOS_MCP send chat \"${chat_identifier}\" \"your message here\"
-
-2. check-new-imessages: Check if $CONTACT_NAME sent new messages
-   - Usage: $MACOS_MCP messages check --phone \"$CONTACT_PHONE\"
-   - Returns JSON with new messages from last hour, or empty array if none
-
-3. view-attachment: When a message has attachments (shown in attachments array or ￼ character in text)
-   - Use the Read tool to view image files directly (PNG, JPG, HEIC, etc.)
-   - Get attachment paths: $MACOS_MCP messages attachments --rowid <ROWID>
-   - Convert HEIC: $MACOS_MCP messages attachments --rowid <ROWID> --convert-heic
-
-4. send-file: Send images or files via iMessage
-   - Usage: $MACOS_MCP send file \"$CONTACT_PHONE\" \"/path/to/image.png\"
-   - Supports any file type (images, PDFs, etc.)
-
-5. All other skills available in your Claude Code environment
-
-RECENT CONVERSATION (JSON):
-${conversation}
-
-YOUR AUTONOMOUS AGENT WORKFLOW:
-
-1. TRIAGE THE REQUEST:
-   Quickly assess: is this a QUICK question (answerable in under a minute) or a TASK that needs work (research, building, multi-step)?
-
-2a. IF QUICK (simple questions, lookups, brief answers):
-   - Work on it immediately
-   - Send ONE response via iMessage with your complete answer
-   - Do NOT send multiple messages
-
-2b. IF TASK (research, building, multi-step work, anything over ~1 minute):
-   - Send a brief acknowledgment like \"On it\" or \"Working on that\" (1 sentence max, be natural)
-   - Register the task: write a task file to track it (see TASK REGISTRY below)
-   - Do the work
-   - When finished, update the task file status to \"done\"
-   - Send the final result via iMessage
-
-3. IF STATUS REQUEST:
-   - If the user is asking about status of background work, check the active tasks directory: ${TMP_DIR}/active_tasks/
-   - Read any .task files there and report what's running, what's done
-   - Clean up any .task files marked \"done\" that are older than 1 hour
-
-TASK REGISTRY:
-- Directory: ${TMP_DIR}/active_tasks/
-- Sanitize the thread_id for filenames: replace every character that is NOT [a-zA-Z0-9_-] with _
-- To register a task, create a file: ${TMP_DIR}/active_tasks/<sanitized_thread_id>.task
-- File format (plain text):
-  DESCRIPTION: <one-line summary of the task>
-  STATUS: working
-  STARTED: <timestamp>
-  THREAD: <thread_id>
-- When done, update the file:
-  DESCRIPTION: <one-line summary>
-  STATUS: done
-  STARTED: <original timestamp>
-  FINISHED: <timestamp>
-  THREAD: <thread_id>
-  RESULT: <one-line summary of outcome>
-
-IMPORTANT RULES:
-- Always use the send-message skill to reply (don't just print to stdout)
-- Keep messages concise and natural (this is iMessage, not email)
-- If you're stuck or need clarification, ask via iMessage
-- Don't apologize excessively - be helpful and direct
-- If the request is dangerous or inappropriate, politely decline
-- When you see ￼ (object replacement character) in message text, it means there's an attachment — check for ATTACHMENT lines in the message data and use Read to view image files
-- Expand ~ to \$HOME in attachment paths before reading them"
-
-    # Run the agent in a background subshell with retry loop.
-    # If the agent registers a task and doesn't finish it, we relaunch
-    # with continuation context (Ralph-loop style).
-    local max_retries=3
     local safe_thread=$(sanitize_thread_id "$thread_id")
-    local task_file="$TMP_DIR/active_tasks/${safe_thread}.task"
 
-    log "  Launching Claude Code agent (thread: $thread_id)..."
+    log "  Launching Agent SDK runner (thread: $thread_id)..."
     (
-        local attempt=0
-        local current_prompt="$agent_prompt"
+        # Use a FIFO to read stderr control messages from agent-runner
+        local stderr_fifo="$TMP_DIR/agent_stderr_${safe_thread}"
+        rm -f "$stderr_fifo"
+        mkfifo "$stderr_fifo"
 
-        while [ $attempt -lt $max_retries ]; do
-            attempt=$((attempt + 1))
-
-            claude -p "$current_prompt" $resume_flag --dangerously-skip-permissions > "$agent_log" 2>&1 &
-            local agent_pid=$!
-            echo "$agent_pid" > "$pid_file"
-
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Agent started with PID: $agent_pid attempt=$attempt (thread: $thread_id)" >> "$LOG_FILE"
-
-            # Keep typing indicator alive while agent works
-            (
-                while kill -0 "$agent_pid" 2>/dev/null; do
-                    sleep 30
-                    "$MACOS_MCP" typing "$CONTACT_PHONE" keepalive > /dev/null 2>&1 || true
-                done
-            ) &
-            local keepalive_pid=$!
-
-            # Timeout watchdog
-            local timed_out=0
-            (
-                sleep "$AGENT_TIMEOUT"
-                if kill -0 "$agent_pid" 2>/dev/null; then
-                    echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Agent timed out after ${AGENT_TIMEOUT}s attempt=$attempt (thread: $thread_id)" >> "$LOG_FILE"
-                    touch "${pid_file}.timedout"
-                    kill "$agent_pid" 2>/dev/null
-                    sleep 2
-                    kill -9 "$agent_pid" 2>/dev/null
+        # Background reader that processes control messages from stderr
+        (
+            while IFS= read -r line; do
+                if [ "$line" = "TYPING:start" ]; then
+                    "$MACOS_MCP" typing "$CONTACT_PHONE" start > /dev/null 2>&1 || true
+                elif [ "$line" = "TYPING:stop" ]; then
+                    "$MACOS_MCP" typing "$CONTACT_PHONE" stop > /dev/null 2>&1 || true
+                else
+                    echo "$line" >> "$agent_log"
                 fi
-            ) &
-            local timeout_pid=$!
+            done < "$stderr_fifo"
+        ) &
+        local reader_pid=$!
 
-            wait "$agent_pid" 2>/dev/null || true
+        # Run agent-runner.py
+        "$AGENT_PYTHON" "$AGENT_RUNNER" \
+            --thread-id "$thread_id" \
+            --message "$initial_message" \
+            --contact-phone "$CONTACT_PHONE" \
+            --contact-name "$CONTACT_NAME" \
+            --chat-identifier "$chat_identifier" \
+            --macos-mcp-path "$MACOS_MCP" \
+            --tmp-dir "$TMP_DIR" \
+            --agent-timeout "$AGENT_TIMEOUT" \
+            --max-retries 3 \
+            $conv_id_flag \
+            $spec_flag \
+            > "$agent_log.stdout" 2> "$stderr_fifo" &
+        local runner_pid=$!
+        echo "$runner_pid" > "$pid_file"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Agent runner PID: $runner_pid (thread: $thread_id)" >> "$LOG_FILE"
 
-            if [ -f "${pid_file}.timedout" ]; then
-                timed_out=1
-                rm -f "${pid_file}.timedout"
-            fi
+        # Typing keepalive while runner is alive
+        (
+            while kill -0 "$runner_pid" 2>/dev/null; do
+                sleep 30
+                "$MACOS_MCP" typing "$CONTACT_PHONE" keepalive > /dev/null 2>&1 || true
+            done
+        ) &
+        local keepalive_pid=$!
 
-            kill "$timeout_pid" 2>/dev/null; wait "$timeout_pid" 2>/dev/null || true
-            kill "$keepalive_pid" 2>/dev/null; wait "$keepalive_pid" 2>/dev/null || true
-            "$MACOS_MCP" typing "$CONTACT_PHONE" stop > /dev/null 2>&1 || true
+        wait "$runner_pid" 2>/dev/null || true
+        kill "$keepalive_pid" 2>/dev/null; wait "$keepalive_pid" 2>/dev/null || true
+        kill "$reader_pid" 2>/dev/null; wait "$reader_pid" 2>/dev/null || true
+        "$MACOS_MCP" typing "$CONTACT_PHONE" stop > /dev/null 2>&1 || true
+        rm -f "$stderr_fifo"
 
-            # Save conversation ID for resume
-            local new_conv_id=$(grep -o 'conversation_id: [a-zA-Z0-9_-]*' "$agent_log" 2>/dev/null | tail -1 | awk '{print $2}')
-            if [ -n "$new_conv_id" ]; then
-                echo "$new_conv_id" > "$conversation_id_file"
-                resume_flag="-r $new_conv_id"
-            fi
+        # Parse result JSON from last line of stdout
+        local result_json=""
+        if [ -f "$agent_log.stdout" ]; then
+            result_json=$(tail -1 "$agent_log.stdout")
+        fi
 
-            # Check task status — if done or no task registered, we're finished
-            local task_status=""
-            local task_desc=""
-            if [ -f "$task_file" ]; then
-                task_status=$(grep '^STATUS:' "$task_file" 2>/dev/null | head -1 | sed 's/^STATUS: *//')
-                task_desc=$(grep '^DESCRIPTION:' "$task_file" 2>/dev/null | head -1 | sed 's/^DESCRIPTION: *//')
-            fi
+        # Extract and save session ID for resume
+        local new_session_id=$(echo "$result_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("session_id") or "")' 2>/dev/null)
+        if [ -n "$new_session_id" ]; then
+            echo "$new_session_id" > "$conversation_id_file"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Saved session: $new_session_id (thread: $thread_id)" >> "$LOG_FILE"
+        fi
 
-            if [ "$task_status" = "done" ] || [ "$task_status" = "" ]; then
-                # Task completed or was a quick response (no task registered)
-                echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Agent finished, task_status='${task_status:-none}' attempt=$attempt (thread: $thread_id)" >> "$LOG_FILE"
-                break
-            fi
+        # Log result summary
+        local sent=$(echo "$result_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("sent", False))' 2>/dev/null)
+        local task_status=$(echo "$result_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("task_status") or "none")' 2>/dev/null)
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Agent completed: sent=$sent task_status=$task_status (thread: $thread_id)" >> "$LOG_FILE"
 
-            # Task still working — retry with continuation prompt
-            if [ $attempt -lt $max_retries ]; then
-                echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Task still working ('$task_desc'), retrying attempt=$((attempt+1)) (thread: $thread_id)" >> "$LOG_FILE"
-
-                # Build continuation prompt
-                local reason="completed without finishing"
-                [ "$timed_out" -eq 1 ] && reason="timed out after ${AGENT_TIMEOUT}s"
-
-                current_prompt="You are continuing an unfinished task for $CONTACT_NAME via iMessage.
-
-TASK TO COMPLETE: ${task_desc}
-PREVIOUS ATTEMPT: ${reason} (attempt $attempt of $max_retries)
-
-${agent_prompt}
-
-IMPORTANT: The task above is NOT done yet. Check the task file at ${task_file} for status. Continue where you left off and finish it. When done, update the task file STATUS to 'done' and send the result via iMessage."
-            else
-                # Max retries reached
-                echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Task still incomplete after $max_retries attempts, giving up (thread: $thread_id)" >> "$LOG_FILE"
-                "$MACOS_MCP" send message "$CONTACT_PHONE" "I wasn't able to finish that task after $max_retries attempts. The goal was: ${task_desc:-unknown}. Can you help me break it down?" > /dev/null 2>&1 || true
-            fi
-        done
-
-        # Clean up
-        rm -f "$pid_file"
+        rm -f "$pid_file" "$agent_log.stdout"
         echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Agent session completed (thread: $thread_id)" >> "$LOG_FILE"
     ) &
 }
