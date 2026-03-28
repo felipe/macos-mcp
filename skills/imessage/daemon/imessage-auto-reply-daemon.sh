@@ -193,8 +193,9 @@ collect_messages() {
                 thread_id="$guid"
             fi
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] New message (thread: $thread_id): \"$text\"" >> "$LOG_FILE"
-            mark_as_processed "$msg_id"
-            echo "${thread_id}|${chat:-$CONTACT_PHONE}|${msg_is_reply}|${text}"
+            # Don't mark as processed here — only mark after successfully dispatching
+            # to an agent, so messages aren't lost when an agent is already running.
+            echo "${msg_id}|${thread_id}|${chat:-$CONTACT_PHONE}|${msg_is_reply}|${text}"
         fi
     done
 }
@@ -319,58 +320,106 @@ IMPORTANT RULES:
 - When you see ￼ (object replacement character) in message text, it means there's an attachment — check for ATTACHMENT lines in the message data and use Read to view image files
 - Expand ~ to \$HOME in attachment paths before reading them"
 
-    # Run the agent and cleanup in a background subshell so the main loop can continue
-    # processing messages for other threads concurrently
+    # Run the agent in a background subshell with retry loop.
+    # If the agent registers a task and doesn't finish it, we relaunch
+    # with continuation context (Ralph-loop style).
+    local max_retries=3
+    local safe_thread=$(sanitize_thread_id "$thread_id")
+    local task_file="$TMP_DIR/active_tasks/${safe_thread}.task"
+
     log "  Launching Claude Code agent (thread: $thread_id)..."
     (
-        # Start Claude Code agent inside the subshell so we can wait on it
-        claude -p "$agent_prompt" $resume_flag --dangerously-skip-permissions > "$agent_log" 2>&1 &
-        local agent_pid=$!
-        echo "$agent_pid" > "$pid_file"
+        local attempt=0
+        local current_prompt="$agent_prompt"
 
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Agent started with PID: $agent_pid (thread: $thread_id)" >> "$LOG_FILE"
+        while [ $attempt -lt $max_retries ]; do
+            attempt=$((attempt + 1))
 
-        # Keep typing indicator alive while agent works (~60s timeout on recipient side)
-        (
-            while kill -0 "$agent_pid" 2>/dev/null; do
-                sleep 30
-                "$MACOS_MCP" typing "$CONTACT_PHONE" keepalive > /dev/null 2>&1 || true
-            done
-        ) &
-        local keepalive_pid=$!
+            claude -p "$current_prompt" $resume_flag --dangerously-skip-permissions > "$agent_log" 2>&1 &
+            local agent_pid=$!
+            echo "$agent_pid" > "$pid_file"
 
-        # Wait for agent to finish, with timeout to prevent hung agents
-        # from blocking the thread indefinitely
-        (
-            sleep "$AGENT_TIMEOUT"
-            if kill -0 "$agent_pid" 2>/dev/null; then
-                echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Agent timed out after ${AGENT_TIMEOUT}s, killing PID $agent_pid (thread: $thread_id)" >> "$LOG_FILE"
-                kill "$agent_pid" 2>/dev/null
-                sleep 2
-                kill -9 "$agent_pid" 2>/dev/null
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Agent started with PID: $agent_pid attempt=$attempt (thread: $thread_id)" >> "$LOG_FILE"
+
+            # Keep typing indicator alive while agent works
+            (
+                while kill -0 "$agent_pid" 2>/dev/null; do
+                    sleep 30
+                    "$MACOS_MCP" typing "$CONTACT_PHONE" keepalive > /dev/null 2>&1 || true
+                done
+            ) &
+            local keepalive_pid=$!
+
+            # Timeout watchdog
+            local timed_out=0
+            (
+                sleep "$AGENT_TIMEOUT"
+                if kill -0 "$agent_pid" 2>/dev/null; then
+                    echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Agent timed out after ${AGENT_TIMEOUT}s attempt=$attempt (thread: $thread_id)" >> "$LOG_FILE"
+                    touch "${pid_file}.timedout"
+                    kill "$agent_pid" 2>/dev/null
+                    sleep 2
+                    kill -9 "$agent_pid" 2>/dev/null
+                fi
+            ) &
+            local timeout_pid=$!
+
+            wait "$agent_pid" 2>/dev/null || true
+
+            if [ -f "${pid_file}.timedout" ]; then
+                timed_out=1
+                rm -f "${pid_file}.timedout"
             fi
-        ) &
-        local timeout_pid=$!
 
-        wait "$agent_pid" 2>/dev/null || true
+            kill "$timeout_pid" 2>/dev/null; wait "$timeout_pid" 2>/dev/null || true
+            kill "$keepalive_pid" 2>/dev/null; wait "$keepalive_pid" 2>/dev/null || true
+            "$MACOS_MCP" typing "$CONTACT_PHONE" stop > /dev/null 2>&1 || true
 
-        # Cancel timeout watchdog
-        kill "$timeout_pid" 2>/dev/null; wait "$timeout_pid" 2>/dev/null || true
+            # Save conversation ID for resume
+            local new_conv_id=$(grep -o 'conversation_id: [a-zA-Z0-9_-]*' "$agent_log" 2>/dev/null | tail -1 | awk '{print $2}')
+            if [ -n "$new_conv_id" ]; then
+                echo "$new_conv_id" > "$conversation_id_file"
+                resume_flag="-r $new_conv_id"
+            fi
 
-        # Stop keepalive loop and clear typing indicator
-        kill "$keepalive_pid" 2>/dev/null; wait "$keepalive_pid" 2>/dev/null || true
-        "$MACOS_MCP" typing "$CONTACT_PHONE" stop > /dev/null 2>&1 || true
+            # Check task status — if done or no task registered, we're finished
+            local task_status=""
+            local task_desc=""
+            if [ -f "$task_file" ]; then
+                task_status=$(grep '^STATUS:' "$task_file" 2>/dev/null | head -1 | sed 's/^STATUS: *//')
+                task_desc=$(grep '^DESCRIPTION:' "$task_file" 2>/dev/null | head -1 | sed 's/^DESCRIPTION: *//')
+            fi
 
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Typing indicator cleared (thread: $thread_id)" >> "$LOG_FILE"
+            if [ "$task_status" = "done" ] || [ "$task_status" = "" ]; then
+                # Task completed or was a quick response (no task registered)
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Agent finished, task_status='${task_status:-none}' attempt=$attempt (thread: $thread_id)" >> "$LOG_FILE"
+                break
+            fi
 
-        # Try to extract conversation ID from agent output for future resumes
-        local new_conv_id=$(grep -o 'conversation_id: [a-zA-Z0-9_-]*' "$agent_log" 2>/dev/null | tail -1 | awk '{print $2}')
-        if [ -n "$new_conv_id" ]; then
-            echo "$new_conv_id" > "$conversation_id_file"
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Saved conversation ID: $new_conv_id (thread: $thread_id)" >> "$LOG_FILE"
-        fi
+            # Task still working — retry with continuation prompt
+            if [ $attempt -lt $max_retries ]; then
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Task still working ('$task_desc'), retrying attempt=$((attempt+1)) (thread: $thread_id)" >> "$LOG_FILE"
 
-        # Clean up PID file
+                # Build continuation prompt
+                local reason="completed without finishing"
+                [ "$timed_out" -eq 1 ] && reason="timed out after ${AGENT_TIMEOUT}s"
+
+                current_prompt="You are continuing an unfinished task for $CONTACT_NAME via iMessage.
+
+TASK TO COMPLETE: ${task_desc}
+PREVIOUS ATTEMPT: ${reason} (attempt $attempt of $max_retries)
+
+${agent_prompt}
+
+IMPORTANT: The task above is NOT done yet. Check the task file at ${task_file} for status. Continue where you left off and finish it. When done, update the task file STATUS to 'done' and send the result via iMessage."
+            else
+                # Max retries reached
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Task still incomplete after $max_retries attempts, giving up (thread: $thread_id)" >> "$LOG_FILE"
+                "$MACOS_MCP" send message "$CONTACT_PHONE" "I wasn't able to finish that task after $max_retries attempts. The goal was: ${task_desc:-unknown}. Can you help me break it down?" > /dev/null 2>&1 || true
+            fi
+        done
+
+        # Clean up
         rm -f "$pid_file"
         echo "[$(date '+%Y-%m-%d %H:%M:%S')]   Agent session completed (thread: $thread_id)" >> "$LOG_FILE"
     ) &
@@ -420,8 +469,10 @@ while true; do
             batch_thread_id=""
 
             for entry in "${collected[@]}"; do
-                t_id="${entry%%|*}"
+                t_msg_id="${entry%%|*}"
                 rest="${entry#*|}"
+                t_id="${rest%%|*}"
+                rest="${rest#*|}"
                 t_chat="${rest%%|*}"
                 rest="${rest#*|}"
                 t_is_reply="${rest%%|*}"
@@ -446,6 +497,8 @@ while true; do
                     printf '%s' "$t_chat" > "$batch_dir/${safe_use_id}.chat"
                     printf '%s' "$use_id" > "$batch_dir/${safe_use_id}.tid"
                 fi
+                # Track msg_ids so we can mark as processed after dispatch
+                echo "$t_msg_id" >> "$batch_dir/${safe_use_id}.ids"
             done
 
             # Launch one agent per thread group
@@ -458,8 +511,12 @@ while true; do
                 if ! is_agent_running "$t_id"; then
                     "$MACOS_MCP" typing "$CONTACT_PHONE" start > /dev/null 2>&1 || log "  Typing indicator failed, continuing"
                     start_autonomous_agent "$t_texts" "$t_chat" "$t_id"
+                    # Mark messages as processed only after successful dispatch
+                    while IFS= read -r mid; do
+                        mark_as_processed "$mid"
+                    done < "$batch_dir/${safe_use_id}.ids"
                 else
-                    log "  Agent already running for thread $t_id, skipping"
+                    log "  Agent already running for thread $t_id, messages will retry next cycle"
                 fi
             done
 
