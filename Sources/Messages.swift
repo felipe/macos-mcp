@@ -69,7 +69,7 @@ private func decodeAttributedBody(_ data: Data) -> String? {
     let skipPrefixes = ["NS", "Apple", "streamtyped", "MSMessage", "bplist"]
     var bestRun = ""
 
-    if let raw = String(data: data, encoding: .utf8) {
+    if let raw = String(data: data, encoding: .isoLatin1) {
         let runs = raw.components(separatedBy: CharacterSet.controlCharacters)
         for run in runs {
             let trimmed = run.trimmingCharacters(in: .whitespacesAndNewlines)
