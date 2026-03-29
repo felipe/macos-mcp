@@ -479,9 +479,16 @@ async def run_agent(args) -> dict:
                                 log(f"  Message sent via {block.name}")
 
         except Exception as e:
-            log(f"Agent exception: {e}")
+            err_str = str(e)
+            log(f"Agent exception: {err_str}")
             if not watchdog_fired.is_set():
-                result["error"] = str(e)
+                result["error"] = err_str
+            # Don't retry on API errors (rate limit, prompt too long, auth)
+            if any(k in err_str.lower() for k in ["limit", "prompt is too long", "auth", "api"]):
+                log(f"Fatal API error, not retrying")
+                # Clear stale session that may be causing "prompt too long"
+                session_id = None
+                break
         finally:
             watchdog_cancelled.set()  # Cancel watchdog if agent finished in time
 
