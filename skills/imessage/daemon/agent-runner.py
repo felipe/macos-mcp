@@ -409,11 +409,13 @@ async def run_agent(args) -> dict:
                 max_retries=max_retries,
             )
 
+        model = "claude-sonnet-4-6"
         options = ClaudeAgentOptions(
             mcp_servers={"imessage": server},
             allowed_tools=allowed_tools,
             permission_mode="bypassPermissions",
-            max_turns=20,
+            model=model,
+            max_turns=10,
             cwd=os.getcwd(),
         )
         if session_id:
@@ -495,7 +497,7 @@ async def run_agent(args) -> dict:
         task_status = read_task_field(task_file, "STATUS")
         result["task_status"] = task_status
 
-        if task_status == "done" or task_status is None:
+        if task_status in ("done", "blocked", None):
             log(
                 f"Agent finished, task_status='{task_status or 'none'}' sent={result['sent']} (attempt {attempt})"
             )
