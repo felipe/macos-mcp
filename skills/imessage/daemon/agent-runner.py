@@ -423,31 +423,33 @@ async def run_agent(args) -> dict:
         timed_out = False
 
         # Thread-based watchdog: asyncio.timeout doesn't work because the SDK
-        # blocks in a subprocess. We kill ALL our descendant processes on timeout.
+        # blocks in a subprocess. Kill child claude processes but NOT ourselves
+        # so the retry loop can continue.
         watchdog_cancelled = threading.Event()
+        watchdog_fired = threading.Event()
 
         def watchdog():
             if watchdog_cancelled.wait(timeout_secs):
                 return  # Cancelled, agent finished in time
-            log(f"Watchdog: timeout after {timeout_secs}s, killing agent (attempt {attempt})")
-            # Kill all child processes of this python process
+            log(f"Watchdog: timeout after {timeout_secs}s, killing child processes (attempt {attempt})")
+            watchdog_fired.set()
+            # Kill child processes (the SDK's bundled claude) but not ourselves
             my_pid = os.getpid()
-            # Use pgrep to find all descendants, then kill them
             try:
+                # Get all descendant PIDs
                 result = subprocess.run(
                     ["pgrep", "-P", str(my_pid)],
                     capture_output=True, text=True, timeout=5,
                 )
                 for pid_str in result.stdout.strip().split("\n"):
-                    if pid_str.strip():
+                    pid_str = pid_str.strip()
+                    if pid_str and pid_str != str(my_pid):
                         try:
-                            os.kill(int(pid_str.strip()), signal.SIGKILL)
+                            os.kill(int(pid_str), signal.SIGKILL)
                         except (ProcessLookupError, ValueError):
                             pass
-            except Exception:
-                pass
-            # Also kill ourselves to ensure we exit
-            os.kill(my_pid, signal.SIGTERM)
+            except Exception as e:
+                log(f"Watchdog kill error: {e}")
 
         watchdog_thread = threading.Thread(target=watchdog, daemon=True)
         watchdog_thread.start()
@@ -475,16 +477,17 @@ async def run_agent(args) -> dict:
                                 log(f"  Message sent via {block.name}")
 
         except Exception as e:
-            err_msg = str(e)
-            if "killed" in err_msg.lower() or "signal" in err_msg.lower():
-                log(f"Agent timed out after {timeout_secs}s (attempt {attempt})")
-                prev_reason = f"timed out after {timeout_secs}s"
-                timed_out = True
-            else:
-                log(f"Agent error: {e}")
+            log(f"Agent exception: {e}")
+            if not watchdog_fired.is_set():
                 result["error"] = str(e)
         finally:
             watchdog_cancelled.set()  # Cancel watchdog if agent finished in time
+
+        # Check if watchdog killed us
+        if watchdog_fired.is_set():
+            log(f"Agent timed out after {timeout_secs}s (attempt {attempt})")
+            prev_reason = f"timed out after {timeout_secs}s"
+            timed_out = True
 
         control("TYPING:stop")
 
