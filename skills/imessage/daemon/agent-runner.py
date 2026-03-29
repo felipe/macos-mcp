@@ -423,25 +423,31 @@ async def run_agent(args) -> dict:
         timed_out = False
 
         # Thread-based watchdog: asyncio.timeout doesn't work because the SDK
-        # blocks in a subprocess. We find and kill the child claude process.
+        # blocks in a subprocess. We kill ALL our descendant processes on timeout.
         watchdog_cancelled = threading.Event()
 
         def watchdog():
             if watchdog_cancelled.wait(timeout_secs):
                 return  # Cancelled, agent finished in time
-            # Timeout — find and kill the SDK's child claude process
             log(f"Watchdog: timeout after {timeout_secs}s, killing agent (attempt {attempt})")
+            # Kill all child processes of this python process
+            my_pid = os.getpid()
+            # Use pgrep to find all descendants, then kill them
             try:
-                import psutil
-                for proc in psutil.Process(os.getpid()).children(recursive=True):
-                    if "claude" in proc.name().lower():
-                        proc.kill()
-            except ImportError:
-                # No psutil — kill our own process group children via pkill
-                subprocess.run(
-                    ["pkill", "-9", "-P", str(os.getpid()), "-f", "claude"],
-                    capture_output=True,
+                result = subprocess.run(
+                    ["pgrep", "-P", str(my_pid)],
+                    capture_output=True, text=True, timeout=5,
                 )
+                for pid_str in result.stdout.strip().split("\n"):
+                    if pid_str.strip():
+                        try:
+                            os.kill(int(pid_str.strip()), signal.SIGKILL)
+                        except (ProcessLookupError, ValueError):
+                            pass
+            except Exception:
+                pass
+            # Also kill ourselves to ensure we exit
+            os.kill(my_pid, signal.SIGTERM)
 
         watchdog_thread = threading.Thread(target=watchdog, daemon=True)
         watchdog_thread.start()
