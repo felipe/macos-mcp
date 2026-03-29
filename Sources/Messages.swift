@@ -66,10 +66,10 @@ private func decodeAttributedBody(_ data: Data) -> String? {
     // Fallback: scan raw bytes for printable UTF-8 runs (similar to shell's `strings -n 4`)
     // The attributedBody contains an NSKeyedArchiver plist with the text embedded.
     // Look for the longest printable string run that isn't a class name.
-    let skipPrefixes = ["NS", "Apple", "streamtyped", "MSMessage", "bplist"]
+    let skipPrefixes = ["NS", "Apple", "streamtyped", "MSMessage", "bplist", "__kIM"]
     var bestRun = ""
 
-    if let raw = String(data: data, encoding: .isoLatin1) {
+    if let raw = String(data: data, encoding: .utf8) {
         let runs = raw.components(separatedBy: CharacterSet.controlCharacters)
         for run in runs {
             let trimmed = run.trimmingCharacters(in: .whitespacesAndNewlines)
