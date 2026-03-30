@@ -111,50 +111,93 @@ private func fetchAttachments(db: OpaquePointer, messageRowid: Int64) -> [[Strin
 
 // MARK: - Messages Check
 
-private func messagesCheck(phone: String?, sinceMinutes: Int) {
+private func messagesCheck(phone: String?, sinceMinutes: Int?, afterRowid: Int64?) {
     let db = openDB()
     defer { sqlite3_close(db) }
 
-    let sinceUnix = Date().timeIntervalSince1970 - Double(sinceMinutes * 60)
-    let sinceAppleNanos = Int64((sinceUnix - appleEpochOffset) * 1_000_000_000)
-
     var messages: [[String: Any]]
 
-    if let phone = phone {
-        let sql = """
-            SELECT m.ROWID, COALESCE(m.text, '') as text, m.is_from_me, m.date,
-                   h.id as handle_id, c.chat_identifier,
-                   COALESCE(m.guid, '') as guid,
-                   COALESCE(m.thread_originator_guid, '') as thread_originator_guid,
-                   m.attributedBody
-            FROM message m
-            JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
-            JOIN chat c ON cmj.chat_id = c.ROWID
-            JOIN chat_handle_join chj ON c.ROWID = chj.chat_id
-            JOIN handle h ON chj.handle_id = h.ROWID
-            WHERE h.id LIKE ? AND m.is_from_me = 0 AND m.date > ?
-            ORDER BY m.date DESC
-            LIMIT 50
-            """
-        messages = query(db, sql: sql) { stmt in
-            let pattern = "%\(phone)%"
-            sqlite3_bind_text(stmt, 1, (pattern as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
-            sqlite3_bind_int64(stmt, 2, sinceAppleNanos)
+    let selectCols = """
+        m.ROWID, COALESCE(m.text, '') as text, m.is_from_me, m.date,
+        h.id as handle_id, c.chat_identifier,
+        COALESCE(m.guid, '') as guid,
+        COALESCE(m.thread_originator_guid, '') as thread_originator_guid,
+        m.attributedBody
+    """
+
+    let selectColsNoHandle = """
+        m.ROWID, COALESCE(m.text, '') as text, m.is_from_me, m.date,
+        '' as handle_id, '' as chat_identifier,
+        COALESCE(m.guid, '') as guid,
+        COALESCE(m.thread_originator_guid, '') as thread_originator_guid,
+        m.attributedBody
+    """
+
+    if let afterRowid = afterRowid {
+        // ROWID watermark mode: monotonic, never misses messages
+        if let phone = phone {
+            let sql = """
+                SELECT \(selectCols)
+                FROM message m
+                JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+                JOIN chat c ON cmj.chat_id = c.ROWID
+                JOIN chat_handle_join chj ON c.ROWID = chj.chat_id
+                JOIN handle h ON chj.handle_id = h.ROWID
+                WHERE h.id LIKE ? AND m.is_from_me = 0 AND m.ROWID > ?
+                ORDER BY m.ROWID ASC
+                LIMIT 50
+                """
+            messages = query(db, sql: sql) { stmt in
+                let pattern = "%\(phone)%"
+                sqlite3_bind_text(stmt, 1, (pattern as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+                sqlite3_bind_int64(stmt, 2, afterRowid)
+            }
+        } else {
+            let sql = """
+                SELECT \(selectColsNoHandle)
+                FROM message m
+                WHERE m.is_from_me = 0 AND m.ROWID > ?
+                ORDER BY m.ROWID ASC
+                LIMIT 50
+                """
+            messages = query(db, sql: sql) { stmt in
+                sqlite3_bind_int64(stmt, 1, afterRowid)
+            }
         }
     } else {
-        let sql = """
-            SELECT m.ROWID, COALESCE(m.text, '') as text, m.is_from_me, m.date,
-                   '' as handle_id, '' as chat_identifier,
-                   COALESCE(m.guid, '') as guid,
-                   COALESCE(m.thread_originator_guid, '') as thread_originator_guid,
-                   m.attributedBody
-            FROM message m
-            WHERE m.is_from_me = 0 AND m.date > ?
-            ORDER BY m.date DESC
-            LIMIT 50
-            """
-        messages = query(db, sql: sql) { stmt in
-            sqlite3_bind_int64(stmt, 1, sinceAppleNanos)
+        // Time-based mode (backward compat)
+        let mins = sinceMinutes ?? 60
+        let sinceUnix = Date().timeIntervalSince1970 - Double(mins * 60)
+        let sinceAppleNanos = Int64((sinceUnix - appleEpochOffset) * 1_000_000_000)
+
+        if let phone = phone {
+            let sql = """
+                SELECT \(selectCols)
+                FROM message m
+                JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+                JOIN chat c ON cmj.chat_id = c.ROWID
+                JOIN chat_handle_join chj ON c.ROWID = chj.chat_id
+                JOIN handle h ON chj.handle_id = h.ROWID
+                WHERE h.id LIKE ? AND m.is_from_me = 0 AND m.date > ?
+                ORDER BY m.date DESC
+                LIMIT 50
+                """
+            messages = query(db, sql: sql) { stmt in
+                let pattern = "%\(phone)%"
+                sqlite3_bind_text(stmt, 1, (pattern as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+                sqlite3_bind_int64(stmt, 2, sinceAppleNanos)
+            }
+        } else {
+            let sql = """
+                SELECT \(selectColsNoHandle)
+                FROM message m
+                WHERE m.is_from_me = 0 AND m.date > ?
+                ORDER BY m.date DESC
+                LIMIT 50
+                """
+            messages = query(db, sql: sql) { stmt in
+                sqlite3_bind_int64(stmt, 1, sinceAppleNanos)
+            }
         }
     }
 
@@ -191,6 +234,17 @@ private func messagesCheck(phone: String?, sinceMinutes: Int) {
     }
 
     printJSON(["messages": result])
+}
+
+// MARK: - Max ROWID
+
+private func messagesMaxRowid() {
+    let db = openDB()
+    defer { sqlite3_close(db) }
+
+    let rows = query(db, sql: "SELECT MAX(ROWID) as max_rowid FROM message")
+    let maxRowid = rows.first?["max_rowid"] as? Int64 ?? 0
+    printJSON(["max_rowid": NSNumber(value: maxRowid)])
 }
 
 // MARK: - Messages Read
@@ -335,19 +389,30 @@ func runMessages(subcommand: String, args: [String]) {
     switch subcommand {
     case "check":
         var phone: String?
-        var sinceMinutes = 60
+        var sinceMinutes: Int? = nil
+        var afterRowid: Int64? = nil
         var i = 0
         while i < args.count {
             switch args[i] {
             case "--phone": phone = requireArgValue(args, &i, flag: "--phone")
             case "--since":
                 let val = requireArgValue(args, &i, flag: "--since")
-                sinceMinutes = Int(val) ?? 60
+                sinceMinutes = Int(val)
+            case "--after-rowid":
+                let val = requireArgValue(args, &i, flag: "--after-rowid")
+                afterRowid = Int64(val)
             default: break
             }
             i += 1
         }
-        messagesCheck(phone: phone, sinceMinutes: sinceMinutes)
+        // Default to --since 60 if neither mode specified
+        if afterRowid == nil && sinceMinutes == nil {
+            sinceMinutes = 60
+        }
+        messagesCheck(phone: phone, sinceMinutes: sinceMinutes, afterRowid: afterRowid)
+
+    case "max-rowid":
+        messagesMaxRowid()
 
     case "read":
         var phone: String?
