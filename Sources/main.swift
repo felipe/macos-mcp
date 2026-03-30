@@ -24,7 +24,7 @@ case "calendar":
 
 case "messages":
     guard args.count >= 2 else {
-        exitWithError("messages requires a subcommand: check|read|list-conversations|attachments")
+        exitWithError("messages requires a subcommand: check|read|list-conversations|attachments|max-rowid")
     }
     runMessages(subcommand: args[1], args: Array(args.dropFirst(2)))
 
@@ -72,7 +72,9 @@ func printUsage() -> Never {
       delete --id ID                          Delete an event
 
     Messages subcommands:
-      check [--phone PHONE] [--since MIN]     Poll recent incoming messages
+      check [--phone PHONE] [--after-rowid N]  Poll new messages after ROWID (preferred)
+      check [--phone PHONE] [--since MIN]      Poll messages in time window (legacy)
+      max-rowid                                Get current max message ROWID
       read [--phone PHONE] [--limit N]        Read conversation history
       list-conversations [--limit N]          List recent conversations
       attachments --rowid N [--convert-heic]  Get message attachments

@@ -27,7 +27,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 MACOS_MCP="$PROJECT_ROOT/macos-mcp"
 TMP_DIR="${IMESSAGE_TMP_DIR:-$HOME/tmp/imessage}"
-PROCESSED_LOG="$TMP_DIR/processed_imessages.log"
 LOG_FILE="$TMP_DIR/imessage-auto-reply.log"
 
 # Configuration from environment variables
@@ -57,8 +56,13 @@ fi
 mkdir -p "$TMP_DIR"
 mkdir -p "$TMP_DIR/active_tasks"
 
-# Create log file if it doesn't exist
-touch "$PROCESSED_LOG"
+# ROWID watermark — initialize to current max so we don't replay old messages
+WATERMARK_FILE="$TMP_DIR/watermark"
+if [ ! -f "$WATERMARK_FILE" ]; then
+    max_rowid=$("$MACOS_MCP" messages max-rowid 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("max_rowid",0))' 2>/dev/null || echo "0")
+    echo "$max_rowid" > "$WATERMARK_FILE"
+fi
+WATERMARK=$(cat "$WATERMARK_FILE")
 
 log() {
     local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
@@ -68,24 +72,6 @@ log() {
 
 # Agent spec loading moved to agent-runner.py
 
-# Generate a unique ID for a message based on rowid, date, and text
-generate_message_id() {
-    local rowid="$1"
-    local date="$2"
-    local text="$3"
-    echo -n "${rowid}_${date}_${text}" | md5
-}
-
-check_if_processed() {
-    local message_id="$1"
-    grep -q "^$message_id$" "$PROCESSED_LOG" 2>/dev/null
-}
-
-mark_as_processed() {
-    local message_id="$1"
-    echo "$message_id" >> "$PROCESSED_LOG"
-}
-
 is_group_chat() {
     local chat_identifier="$1"
     if [[ "$chat_identifier" =~ ^chat ]]; then
@@ -94,29 +80,24 @@ is_group_chat() {
     return 1
 }
 
-# Sanitize thread ID for use in filenames (replace non-alphanumeric chars with underscore)
 sanitize_thread_id() {
     local thread_id="$1"
     echo "$thread_id" | sed 's/[^a-zA-Z0-9_-]/_/g'
 }
 
-# Get per-thread file paths
 get_thread_pid_file() {
     local thread_id="$1"
-    local safe_id=$(sanitize_thread_id "$thread_id")
-    echo "$TMP_DIR/imessage_agent_${safe_id}.pid"
+    echo "$TMP_DIR/imessage_agent_$(sanitize_thread_id "$thread_id").pid"
 }
 
 get_thread_conversation_file() {
     local thread_id="$1"
-    local safe_id=$(sanitize_thread_id "$thread_id")
-    echo "$TMP_DIR/imessage_conversation_${safe_id}.txt"
+    echo "$TMP_DIR/imessage_conversation_$(sanitize_thread_id "$thread_id").txt"
 }
 
 get_thread_agent_log() {
     local thread_id="$1"
-    local safe_id=$(sanitize_thread_id "$thread_id")
-    echo "$TMP_DIR/imessage-agent-${safe_id}.log"
+    echo "$TMP_DIR/imessage-agent-$(sanitize_thread_id "$thread_id").log"
 }
 
 is_agent_running() {
@@ -124,59 +105,33 @@ is_agent_running() {
     local pid_file=$(get_thread_pid_file "$thread_id")
     if [ -f "$pid_file" ]; then
         local pid=$(cat "$pid_file")
-        # Verify PID is alive AND is actually a claude/python process (guards against PID reuse)
         if ps -p "$pid" -o comm= 2>/dev/null | grep -qE 'claude|python'; then
             return 0
         else
-            # PID file is stale — process dead or PID reused by unrelated process
             rm -f "$pid_file"
         fi
     fi
     return 1
 }
 
-# Parse JSON messages output into tab-separated lines for bash processing
-# Output: one line per message: msg_id\tguid\ttext\tthread_reply_to\tchat
+# Parse JSON messages into tab-separated lines for bash processing
+# Output: one line per message: rowid\tguid\ttext\tthread_reply_to\tchat
 parse_messages_json() {
     python3 -c '
-import json, sys, hashlib
+import json, sys
 try:
     data = json.load(sys.stdin)
 except:
     sys.exit(0)
 for msg in data.get("messages", []):
     rowid = str(msg.get("rowid", ""))
-    date = msg.get("date", "")
     text = msg.get("text", "").replace("\t", " ").replace("\n", " ")
     guid = msg.get("guid", "")
     thread = msg.get("thread_reply_to", "")
     chat = msg.get("chat", "")
-    msg_id = hashlib.md5(f"{rowid}_{date}_{text}".encode()).hexdigest()
-    print(f"{msg_id}\t{guid}\t{text}\t{thread}\t{chat}")
+    if text:  # skip empty text messages
+        print(f"{rowid}\t{guid}\t{text}\t{thread}\t{chat}")
 '
-}
-
-# Collect unprocessed messages from JSON check output
-collect_messages() {
-    local json_output="$1"
-    echo "$json_output" | parse_messages_json | while IFS=$'\t' read -r msg_id guid text thread_reply_to chat; do
-        [ -z "$msg_id" ] && continue
-        [ -z "$text" ] && continue
-        if ! check_if_processed "$msg_id"; then
-            thread_id="default"
-            msg_is_reply=0
-            if [ -n "$thread_reply_to" ]; then
-                thread_id="$thread_reply_to"
-                msg_is_reply=1
-            elif [ -n "$guid" ]; then
-                thread_id="$guid"
-            fi
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] New message (thread: $thread_id): \"$text\"" >> "$LOG_FILE"
-            # Don't mark as processed here — only mark after successfully dispatching
-            # to an agent, so messages aren't lost when an agent is already running.
-            echo "${msg_id}|${thread_id}|${chat:-$CONTACT_PHONE}|${msg_is_reply}|${text}"
-        fi
-    done
 }
 
 start_autonomous_agent() {
@@ -295,59 +250,88 @@ log "Contact: $CONTACT_NAME ($CONTACT_PHONE)"
 log "Check interval: ${CHECK_INTERVAL}s"
 log "Binary: $MACOS_MCP"
 log "Tmp directory: $TMP_DIR"
+log "Watermark: $WATERMARK"
 log "Log file: $LOG_FILE"
 log ""
 
 while true; do
-    # Check for new messages (JSON output)
-    new_messages=$("$MACOS_MCP" messages check --phone "$CONTACT_PHONE" --since 60 2>/dev/null)
+    # Check for new messages using ROWID watermark (monotonic, never misses)
+    new_messages=$("$MACOS_MCP" messages check --phone "$CONTACT_PHONE" --after-rowid "$WATERMARK" 2>/dev/null)
 
     # Quick check: any messages at all?
     msg_count=$(echo "$new_messages" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("messages",[])))' 2>/dev/null || echo "0")
 
     if [ "$msg_count" -gt 0 ]; then
-        # Parse JSON and collect unprocessed messages
+        # Parse messages — all are new by definition (ROWID > watermark)
         collected=()
-        while IFS= read -r entry; do
-            [ -n "$entry" ] && collected+=("$entry")
-        done < <(collect_messages "$new_messages")
+        max_rowid="$WATERMARK"
+        while IFS=$'\t' read -r rowid guid text thread_reply_to chat; do
+            [ -z "$rowid" ] && continue
+            [ "$rowid" -gt "$max_rowid" ] 2>/dev/null && max_rowid="$rowid"
 
-        # If we collected new messages, debounce to catch rapid follow-ups
+            thread_id="default"
+            msg_is_reply=0
+            if [ -n "$thread_reply_to" ]; then
+                thread_id="$thread_reply_to"
+                msg_is_reply=1
+            elif [ -n "$guid" ]; then
+                thread_id="$guid"
+            fi
+
+            log "New message (rowid: $rowid, thread: $thread_id): \"$text\""
+            collected+=("${thread_id}|${chat:-$CONTACT_PHONE}|${msg_is_reply}|${text}")
+        done < <(echo "$new_messages" | parse_messages_json)
+
+        # Advance watermark (these messages are claimed)
+        if [ "$max_rowid" != "$WATERMARK" ]; then
+            WATERMARK="$max_rowid"
+            echo "$WATERMARK" > "$WATERMARK_FILE"
+        fi
+
         if [ ${#collected[@]} -gt 0 ]; then
             log "Debouncing ${DEBOUNCE_SECONDS}s..."
             sleep "$DEBOUNCE_SECONDS"
 
             # Check for more messages that arrived during debounce
-            more_messages=$("$MACOS_MCP" messages check --phone "$CONTACT_PHONE" --since 60 2>/dev/null)
-            while IFS= read -r entry; do
-                [ -n "$entry" ] && collected+=("$entry")
-            done < <(collect_messages "$more_messages")
+            more_messages=$("$MACOS_MCP" messages check --phone "$CONTACT_PHONE" --after-rowid "$WATERMARK" 2>/dev/null)
+            while IFS=$'\t' read -r rowid guid text thread_reply_to chat; do
+                [ -z "$rowid" ] && continue
+                [ "$rowid" -gt "$max_rowid" ] 2>/dev/null && max_rowid="$rowid"
 
-            # Group collected messages by thread and launch agents
-            # Reply-thread messages keep their own thread ID; standalone messages
-            # (each with a unique GUID) get merged under one "batch" thread.
-            # Uses temp files instead of associative arrays for Bash 3.2 compatibility.
+                thread_id="default"
+                msg_is_reply=0
+                if [ -n "$thread_reply_to" ]; then
+                    thread_id="$thread_reply_to"
+                    msg_is_reply=1
+                elif [ -n "$guid" ]; then
+                    thread_id="$guid"
+                fi
+
+                log "New message (rowid: $rowid, thread: $thread_id): \"$text\""
+                collected+=("${thread_id}|${chat:-$CONTACT_PHONE}|${msg_is_reply}|${text}")
+            done < <(echo "$more_messages" | parse_messages_json)
+
+            # Advance watermark again
+            if [ "$max_rowid" != "$WATERMARK" ]; then
+                WATERMARK="$max_rowid"
+                echo "$WATERMARK" > "$WATERMARK_FILE"
+            fi
+
+            # Group by thread and launch agents
             batch_dir=$(mktemp -d "$TMP_DIR/batch.XXXXXX")
             batch_thread_id=""
 
             for entry in "${collected[@]}"; do
-                t_msg_id="${entry%%|*}"
+                t_id="${entry%%|*}"
                 rest="${entry#*|}"
-                t_id="${rest%%|*}"
-                rest="${rest#*|}"
                 t_chat="${rest%%|*}"
                 rest="${rest#*|}"
                 t_is_reply="${rest%%|*}"
                 t_text="${rest#*|}"
 
                 use_id="$t_id"
-
-                # Reply-thread messages always keep their own thread ID.
-                # Standalone messages (not replies, unique GUID) get batched together.
                 if [ "$t_is_reply" -eq 0 ] && [ "$t_id" != "default" ] && [ ${#t_id} -gt 20 ]; then
-                    if [ -z "$batch_thread_id" ]; then
-                        batch_thread_id="$t_id"
-                    fi
+                    [ -z "$batch_thread_id" ] && batch_thread_id="$t_id"
                     use_id="$batch_thread_id"
                 fi
 
@@ -359,8 +343,6 @@ while true; do
                     printf '%s' "$t_chat" > "$batch_dir/${safe_use_id}.chat"
                     printf '%s' "$use_id" > "$batch_dir/${safe_use_id}.tid"
                 fi
-                # Track msg_ids so we can mark as processed after dispatch
-                echo "$t_msg_id" >> "$batch_dir/${safe_use_id}.ids"
             done
 
             # Launch one agent per thread group
@@ -373,12 +355,8 @@ while true; do
                 if ! is_agent_running "$t_id"; then
                     "$MACOS_MCP" typing "$CONTACT_PHONE" start > /dev/null 2>&1 || log "  Typing indicator failed, continuing"
                     start_autonomous_agent "$t_texts" "$t_chat" "$t_id"
-                    # Mark messages as processed only after successful dispatch
-                    while IFS= read -r mid; do
-                        mark_as_processed "$mid"
-                    done < "$batch_dir/${safe_use_id}.ids"
                 else
-                    log "  Agent already running for thread $t_id, messages will retry next cycle"
+                    log "  Agent already running for thread $t_id, skipping"
                 fi
             done
 
