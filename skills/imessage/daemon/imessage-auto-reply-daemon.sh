@@ -56,6 +56,16 @@ fi
 mkdir -p "$TMP_DIR"
 mkdir -p "$TMP_DIR/active_tasks"
 
+# Clean up stale task files on startup (tasks from previous daemon runs)
+for task_file in "$TMP_DIR/active_tasks"/*.task; do
+    [ -f "$task_file" ] || continue
+    task_status=$(grep '^STATUS:' "$task_file" 2>/dev/null | head -1 | sed 's/^STATUS: *//')
+    if [ "$task_status" != "done" ] && [ "$task_status" != "blocked" ]; then
+        # Stale working task from a previous daemon run — remove it
+        rm -f "$task_file"
+    fi
+done
+
 # ROWID watermark — initialize to current max so we don't replay old messages
 WATERMARK_FILE="$TMP_DIR/watermark"
 if [ ! -f "$WATERMARK_FILE" ]; then
