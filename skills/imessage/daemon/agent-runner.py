@@ -30,7 +30,9 @@ from claude_agent_sdk import (
     ResultMessage,
     SystemMessage,
     TextBlock,
+    ToolResultBlock,
     ToolUseBlock,
+    UserMessage,
     create_sdk_mcp_server,
     query,
     tool,
@@ -387,6 +389,7 @@ async def run_agent(args) -> dict:
     task_file = get_task_file(tmp_dir, thread_id)
     session_id = args.conversation_id or None
     result = {"sent": False, "task_status": None, "session_id": None, "error": None}
+    pending_send_ids: dict[str, str] = {}  # tool_use_id -> tool_name
     prev_reason = ""
 
     for attempt in range(1, max_retries + 1):
@@ -467,7 +470,7 @@ async def run_agent(args) -> dict:
                         log(f"  Agent error: {message.result}")
                         result["error"] = message.result
 
-                # Detect tool use to track if we sent a message
+                # Track send tool calls — mark sent only after result confirms success
                 elif isinstance(message, AssistantMessage):
                     for block in message.content:
                         if isinstance(block, ToolUseBlock):
@@ -475,8 +478,18 @@ async def run_agent(args) -> dict:
                                 "mcp__imessage__send_imessage",
                                 "mcp__imessage__send_to_chat",
                             ):
+                                pending_send_ids[block.id] = block.name
+                                log(f"  Send requested via {block.name} (awaiting result)")
+
+                elif isinstance(message, UserMessage):
+                    for block in message.content if isinstance(message.content, list) else []:
+                        if isinstance(block, ToolResultBlock) and block.tool_use_id in pending_send_ids:
+                            tool_name = pending_send_ids.pop(block.tool_use_id)
+                            if block.is_error:
+                                log(f"  Send FAILED via {tool_name}: {block.content}")
+                            else:
                                 result["sent"] = True
-                                log(f"  Message sent via {block.name}")
+                                log(f"  Message sent via {tool_name}")
 
         except Exception as e:
             err_str = str(e)
