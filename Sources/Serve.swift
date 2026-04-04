@@ -2,6 +2,42 @@ import CommonCrypto
 import Foundation
 import Network
 
+// MARK: - Structured Logging
+
+private enum LogLevel: String {
+    case info = "info"
+    case warn = "warn"
+    case error = "error"
+}
+
+private enum LogComponent: String {
+    case mcp = "mcp"
+    case poller = "poller"
+    case typing = "typing"
+    case webhook = "webhook"
+    case vault = "vault"
+    case server = "server"
+}
+
+private func log(_ level: LogLevel, _ component: LogComponent, _ message: String, extra: [String: Any]? = nil) {
+    let ts = ISO8601DateFormatter().string(from: Date())
+    var entry: [String: Any] = [
+        "ts": ts,
+        "level": level.rawValue,
+        "component": component.rawValue,
+        "msg": message,
+    ]
+    if let extra = extra {
+        for (k, v) in extra { entry[k] = v }
+    }
+    if let data = try? JSONSerialization.data(withJSONObject: entry, options: []),
+       let json = String(data: data, encoding: .utf8) {
+        fputs(json + "\n", stderr)
+    } else {
+        fputs("[\(ts)] [\(level.rawValue)] [\(component.rawValue)] \(message)\n", stderr)
+    }
+}
+
 // MARK: - MCP Server
 
 /// Lightweight MCP server (Streamable HTTP transport).
@@ -289,6 +325,8 @@ private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
     let output = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     if result.exitCode != 0 {
         let err = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        let errorMsg = err.isEmpty ? (output.isEmpty ? "exit code \(result.exitCode)" : output) : err
+        log(.error, .mcp, "Tool failed", extra: ["tool": name, "exit_code": result.exitCode, "error": errorMsg])
         return err.isEmpty ? (output.isEmpty ? "{\"error\": \"exit code \(result.exitCode)\"}" : output) : err
     }
     return output.isEmpty ? "{\"ok\": true}" : output
@@ -384,8 +422,10 @@ private func vaultWrite(_ path: String, content: String) -> String {
     do {
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         try content.write(toFile: fullPath, atomically: true, encoding: .utf8)
+        log(.info, .vault, "Written", extra: ["path": path, "bytes": content.utf8.count])
         return "{\"ok\": true, \"path\": \"\(path)\"}"
     } catch {
+        log(.error, .vault, "Write failed", extra: ["path": path, "error": error.localizedDescription])
         return "{\"error\": \"Write failed: \(error.localizedDescription)\"}"
     }
 }
@@ -613,7 +653,7 @@ private func handleMCPRequest(_ request: HTTPRequest) -> Data {
         let toolName = params["name"] as? String ?? ""
         let toolArgs = params["arguments"] as? [String: Any] ?? [:]
 
-        fputs("[\(ISO8601DateFormatter().string(from: Date()))] Tool call: \(toolName)\n", stderr)
+        log(.info, .mcp, "Tool call", extra: ["tool": toolName])
         let output = dispatchTool(toolName, toolArgs)
 
         let result = jsonRpcResult(id, [
@@ -749,10 +789,10 @@ func runServe(args: [String]) {
     listener.stateUpdateHandler = { state in
         switch state {
         case .ready:
-            fputs("macos-mcp MCP server listening on \(host):\(port)\n", stderr)
-            fputs("Streamable HTTP: http://\(host):\(port)/mcp\n", stderr)
+            log(.info, .server, "MCP server listening", extra: ["host": host, "port": port])
+            log(.info, .server, "Streamable HTTP endpoint", extra: ["url": "http://\(host):\(port)/mcp"])
         case .failed(let error):
-            fputs("Server failed: \(error)\n", stderr)
+            log(.error, .server, "Server failed", extra: ["error": "\(error)"])
             exit(1)
         default:
             break
@@ -807,14 +847,21 @@ private func startPoller(
             }
         }
 
-        fputs("Poller started (watermark: \(watermark), phone: \(phone.isEmpty ? "all" : phone))\n", stderr)
-        fputs("Webhook: \(webhookURL)\n", stderr)
+        log(.info, .poller, "Poller started", extra: ["watermark": watermark, "phone": phone.isEmpty ? "all" : phone, "webhook": webhookURL])
 
         var pending: [(text: String, thread: String, rowid: Int)] = []
         var lastMessageTime: Date = .distantPast
+        var lastHeartbeat: Date = Date()
+        let heartbeatInterval: TimeInterval = 300  // log heartbeat every 5 min
 
         while true {
             Thread.sleep(forTimeInterval: pollInterval)
+
+            // Periodic heartbeat
+            if Date().timeIntervalSince(lastHeartbeat) >= heartbeatInterval {
+                log(.info, .poller, "Heartbeat", extra: ["watermark": watermark, "pending": pending.count])
+                lastHeartbeat = Date()
+            }
 
             // Poll for new messages
             var checkArgs = ["messages", "check", "--after-rowid", String(watermark)]
@@ -848,7 +895,7 @@ private func startPoller(
                 let thread = msg["chat"] as? String ?? msg["from"] as? String ?? "unknown"
                 if text.isEmpty { continue }
 
-                fputs("New message (rowid: \(rowid), thread: \(thread)): \(String(text.prefix(80)))\n", stderr)
+                log(.info, .poller, "New message", extra: ["rowid": rowid, "thread": thread, "preview": String(text.prefix(80))])
                 pending.append((text: text, thread: thread, rowid: rowid))
                 lastMessageTime = Date()
             }
@@ -905,7 +952,7 @@ private func flushToWebhook(
 
         // Run ALL typing indicator work in background — never block the poller
         DispatchQueue.global().async {
-            fputs("Starting typing indicator for \(thread)\n", stderr)
+            log(.info, .typing, "Starting typing indicator", extra: ["thread": thread])
             runProcess(binary, arguments: ["typing", contact, "start"], timeout: 10)
 
             let keepaliveInterval: TimeInterval = 25
@@ -922,7 +969,7 @@ private func flushToWebhook(
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let currentMax = json["max_rowid"] as? Int,
                    currentMax > baseRowid {
-                    fputs("Outbound message detected, stopping typing indicator\n", stderr)
+                    log(.info, .typing, "Outbound detected, stopping")
                     break
                 }
 
@@ -932,7 +979,7 @@ private func flushToWebhook(
             runProcess(binary, arguments: ["typing", contact, "stop"], timeout: 10)
         }
 
-        fputs("Flushing \(msgs.count) message(s) from \(thread) to webhook\n", stderr)
+        log(.info, .webhook, "Flushing to webhook", extra: ["thread": thread, "count": msgs.count])
 
         guard let url = URL(string: webhookURL) else { continue }
         var request = URLRequest(url: url, timeoutInterval: 30)
@@ -944,10 +991,14 @@ private func flushToWebhook(
         let sem = DispatchSemaphore(value: 0)
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
-                fputs("Webhook error: \(error.localizedDescription)\n", stderr)
+                log(.error, .webhook, "Request failed", extra: ["error": error.localizedDescription])
             } else if let httpResp = response as? HTTPURLResponse {
                 let respBody = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-                fputs("Webhook response: \(httpResp.statusCode) \(String(respBody.prefix(200)))\n", stderr)
+                if httpResp.statusCode >= 400 {
+                    log(.error, .webhook, "HTTP error", extra: ["status": httpResp.statusCode, "body": String(respBody.prefix(200))])
+                } else {
+                    log(.info, .webhook, "Accepted", extra: ["status": httpResp.statusCode])
+                }
             }
             sem.signal()
         }
