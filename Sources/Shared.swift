@@ -72,7 +72,7 @@ func requireArgValue(_ args: [String], _ i: inout Int, flag: String) -> String {
 // MARK: - Process Helpers
 
 @discardableResult
-func runProcess(_ executablePath: String, arguments: [String], input: String? = nil) -> (stdout: String, stderr: String, exitCode: Int32) {
+func runProcess(_ executablePath: String, arguments: [String], input: String? = nil, timeout: TimeInterval = 0) -> (stdout: String, stderr: String, exitCode: Int32) {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: executablePath)
     process.arguments = arguments
@@ -92,9 +92,27 @@ func runProcess(_ executablePath: String, arguments: [String], input: String? = 
 
     do {
         try process.run()
-        process.waitUntilExit()
     } catch {
         return ("", error.localizedDescription, 1)
+    }
+
+    if timeout > 0 {
+        let deadline = DispatchTime.now() + timeout
+        let sem = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            process.waitUntilExit()
+            sem.signal()
+        }
+        if sem.wait(timeout: deadline) == .timedOut {
+            process.terminate()
+            // Give it a moment, then force kill
+            DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            }
+            return ("", "Process timed out after \(Int(timeout))s", 1)
+        }
+    } else {
+        process.waitUntilExit()
     }
 
     let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
