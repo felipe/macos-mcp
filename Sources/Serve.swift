@@ -39,6 +39,75 @@ private let mcpTools: [[String: Any]] = [
         ] as [String: Any],
     ],
     [
+        "name": "send_file",
+        "description": "Send a file attachment via iMessage (image, PDF, etc.)",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "contact": ["type": "string", "description": "Phone number like +13035551234"],
+                "file_path": ["type": "string", "description": "Absolute path to file on the Mac"],
+            ],
+            "required": ["contact", "file_path"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "download_file",
+        "description": "Download a file from a URL to the Mac. Returns the local path. Use with send_file to send images/files via iMessage.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "url": ["type": "string", "description": "URL to download"],
+                "filename": ["type": "string", "description": "Optional filename (auto-detected if omitted)"],
+            ],
+            "required": ["url"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "vault_read",
+        "description": "Read a file from the Obsidian vault (Obsidian Vault). Path is relative to vault root.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "path": ["type": "string", "description": "Relative path like Personal/VOICE.md"],
+            ],
+            "required": ["path"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "vault_write",
+        "description": "Write or update a file in the Obsidian vault (Obsidian Vault). Path is relative to vault root.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "path": ["type": "string", "description": "Relative path like Work/notes.md"],
+                "content": ["type": "string", "description": "File content to write"],
+            ],
+            "required": ["path", "content"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "vault_list",
+        "description": "List files and folders in the Obsidian vault. Path is relative to vault root.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "path": ["type": "string", "description": "Relative path (empty for root)"],
+            ],
+        ] as [String: Any],
+    ],
+    [
+        "name": "vault_search",
+        "description": "Search for files in the Obsidian vault by name or content.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "query": ["type": "string", "description": "Search term"],
+                "content_search": ["type": "boolean", "description": "Search inside file contents (default: filename only)"],
+            ],
+            "required": ["query"],
+        ] as [String: Any],
+    ],
+    [
         "name": "check_messages",
         "description": "Check for new iMessages. Use after_rowid for efficient polling.",
         "inputSchema": [
@@ -160,6 +229,18 @@ private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
         args = ["send", "message", input["contact"] as? String ?? "", input["text"] as? String ?? ""]
     case "send_to_chat":
         args = ["send", "chat", input["chat_id"] as? String ?? "", input["text"] as? String ?? ""]
+    case "send_file":
+        args = ["send", "file", input["contact"] as? String ?? "", input["file_path"] as? String ?? ""]
+    case "download_file":
+        return downloadFile(input["url"] as? String ?? "", filename: input["filename"] as? String)
+    case "vault_read":
+        return vaultRead(input["path"] as? String ?? "")
+    case "vault_write":
+        return vaultWrite(input["path"] as? String ?? "", content: input["content"] as? String ?? "")
+    case "vault_list":
+        return vaultList(input["path"] as? String ?? "")
+    case "vault_search":
+        return vaultSearch(input["query"] as? String ?? "", contentSearch: input["content_search"] as? Bool ?? false)
     case "check_messages":
         args = ["messages", "check"]
         if let phone = input["phone"] as? String, !phone.isEmpty { args += ["--phone", phone] }
@@ -211,6 +292,150 @@ private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
         return err.isEmpty ? (output.isEmpty ? "{\"error\": \"exit code \(result.exitCode)\"}" : output) : err
     }
     return output.isEmpty ? "{\"ok\": true}" : output
+}
+
+// MARK: - Download Helper
+
+/// Download a URL to a temp file on the Mac, return JSON with the local path.
+private func downloadFile(_ urlString: String, filename: String?) -> String {
+    guard let url = URL(string: urlString) else {
+        return "{\"error\": \"Invalid URL\"}"
+    }
+
+    let downloadDir = NSHomeDirectory() + "/tmp/imessage/downloads"
+    try? FileManager.default.createDirectory(atPath: downloadDir, withIntermediateDirectories: true)
+
+    // Determine filename
+    let name: String
+    if let f = filename, !f.isEmpty {
+        name = f
+    } else {
+        // Use last path component or generate one
+        let lastComponent = url.lastPathComponent
+        if lastComponent.count > 1 && lastComponent.contains(".") {
+            name = lastComponent
+        } else {
+            name = "download-\(UUID().uuidString.prefix(8))"
+        }
+    }
+
+    let destPath = (downloadDir as NSString).appendingPathComponent(name)
+
+    let sem = DispatchSemaphore(value: 0)
+    var resultJSON = "{\"error\": \"Download failed\"}"
+
+    let task = URLSession.shared.downloadTask(with: url) { tempURL, response, error in
+        if let error = error {
+            resultJSON = "{\"error\": \"\(error.localizedDescription.replacingOccurrences(of: "\"", with: "'"))\"}"
+            sem.signal()
+            return
+        }
+        guard let tempURL = tempURL else {
+            sem.signal()
+            return
+        }
+
+        // Move to destination
+        try? FileManager.default.removeItem(atPath: destPath)
+        do {
+            try FileManager.default.moveItem(at: tempURL, to: URL(fileURLWithPath: destPath))
+            let size = (try? FileManager.default.attributesOfItem(atPath: destPath)[.size] as? Int) ?? 0
+            resultJSON = "{\"path\": \"\(destPath)\", \"size\": \(size)}"
+        } catch {
+            resultJSON = "{\"error\": \"Failed to save: \(error.localizedDescription.replacingOccurrences(of: "\"", with: "'"))\"}"
+        }
+        sem.signal()
+    }
+    task.resume()
+
+    // Wait up to 60 seconds
+    if sem.wait(timeout: .now() + 60) == .timedOut {
+        task.cancel()
+        return "{\"error\": \"Download timed out\"}"
+    }
+
+    return resultJSON
+}
+
+// MARK: - Vault Helpers
+
+private let vaultRoot = (ProcessInfo.processInfo.environment["OBSIDIAN_VAULT_PATH"]
+    ?? NSHomeDirectory() + "/Library/Mobile Documents/com~apple~CloudDocs/Obsidian Vault")
+
+private func vaultRead(_ path: String) -> String {
+    let fullPath = (vaultRoot as NSString).appendingPathComponent(path)
+    guard FileManager.default.fileExists(atPath: fullPath) else {
+        return "{\"error\": \"File not found: \(path)\"}"
+    }
+    guard let content = try? String(contentsOfFile: fullPath, encoding: .utf8) else {
+        return "{\"error\": \"Could not read file: \(path)\"}"
+    }
+    let escaped = content.replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"")
+        .replacingOccurrences(of: "\n", with: "\\n")
+        .replacingOccurrences(of: "\r", with: "\\r")
+        .replacingOccurrences(of: "\t", with: "\\t")
+    return "{\"path\": \"\(path)\", \"content\": \"\(escaped)\"}"
+}
+
+private func vaultWrite(_ path: String, content: String) -> String {
+    let fullPath = (vaultRoot as NSString).appendingPathComponent(path)
+    let dir = (fullPath as NSString).deletingLastPathComponent
+    do {
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try content.write(toFile: fullPath, atomically: true, encoding: .utf8)
+        return "{\"ok\": true, \"path\": \"\(path)\"}"
+    } catch {
+        return "{\"error\": \"Write failed: \(error.localizedDescription)\"}"
+    }
+}
+
+private func vaultList(_ path: String) -> String {
+    let fullPath = path.isEmpty ? vaultRoot : (vaultRoot as NSString).appendingPathComponent(path)
+    guard let items = try? FileManager.default.contentsOfDirectory(atPath: fullPath) else {
+        return "{\"error\": \"Could not list: \(path)\"}"
+    }
+    let entries = items.filter { !$0.hasPrefix(".") }.sorted().map { name -> [String: Any] in
+        let itemPath = (fullPath as NSString).appendingPathComponent(name)
+        var isDir: ObjCBool = false
+        FileManager.default.fileExists(atPath: itemPath, isDirectory: &isDir)
+        return ["name": name, "type": isDir.boolValue ? "directory" : "file"]
+    }
+    guard let data = try? JSONSerialization.data(withJSONObject: ["path": path, "entries": entries]),
+          let json = String(data: data, encoding: .utf8) else {
+        return "{\"error\": \"Serialization failed\"}"
+    }
+    return json
+}
+
+private func vaultSearch(_ query: String, contentSearch: Bool) -> String {
+    let fm = FileManager.default
+    var results: [[String: String]] = []
+    let enumerator = fm.enumerator(atPath: vaultRoot)
+
+    while let file = enumerator?.nextObject() as? String {
+        guard file.hasSuffix(".md"), !file.contains("/.") else { continue }
+
+        if contentSearch {
+            let fullPath = (vaultRoot as NSString).appendingPathComponent(file)
+            if let content = try? String(contentsOfFile: fullPath, encoding: .utf8),
+               content.localizedCaseInsensitiveContains(query) {
+                results.append(["path": file, "match": "content"])
+            }
+        } else {
+            if file.localizedCaseInsensitiveContains(query) {
+                results.append(["path": file, "match": "filename"])
+            }
+        }
+
+        if results.count >= 50 { break }
+    }
+
+    guard let data = try? JSONSerialization.data(withJSONObject: ["query": query, "results": results]),
+          let json = String(data: data, encoding: .utf8) else {
+        return "{\"error\": \"Serialization failed\"}"
+    }
+    return json
 }
 
 // MARK: - JSON-RPC Helpers
@@ -678,17 +903,15 @@ private func flushToWebhook(
         // Extract contact number for typing indicator (strip + prefix for AppleScript)
         let contact = thread.hasPrefix("+") ? String(thread.dropFirst()) : thread
 
-        // Start typing indicator
-        fputs("Starting typing indicator for \(thread)\n", stderr)
-        runProcess(binary, arguments: ["typing", contact, "start"])
-
-        // Start keepalive + auto-stop in background
-        let typingDone = DispatchSemaphore(value: 0)
+        // Run ALL typing indicator work in background — never block the poller
         DispatchQueue.global().async {
-            let keepaliveInterval: TimeInterval = 25  // refresh before 60s timeout
-            let maxWait: TimeInterval = 300  // give up after 5 minutes
+            fputs("Starting typing indicator for \(thread)\n", stderr)
+            runProcess(binary, arguments: ["typing", contact, "start"], timeout: 10)
+
+            let keepaliveInterval: TimeInterval = 25
+            let maxWait: TimeInterval = 300
             let startTime = Date()
-            var lastRowid = maxRowid
+            let baseRowid = maxRowid
 
             while Date().timeIntervalSince(startTime) < maxWait {
                 Thread.sleep(forTimeInterval: keepaliveInterval)
@@ -698,18 +921,15 @@ private func flushToWebhook(
                 if let data = result.stdout.data(using: .utf8),
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let currentMax = json["max_rowid"] as? Int,
-                   currentMax > lastRowid {
-                    // New message appeared — likely the reply. Stop typing.
+                   currentMax > baseRowid {
                     fputs("Outbound message detected, stopping typing indicator\n", stderr)
                     break
                 }
 
-                // Send keepalive
-                runProcess(binary, arguments: ["typing", contact, "keepalive"])
+                runProcess(binary, arguments: ["typing", contact, "keepalive"], timeout: 10)
             }
 
-            runProcess(binary, arguments: ["typing", contact, "stop"])
-            typingDone.signal()
+            runProcess(binary, arguments: ["typing", contact, "stop"], timeout: 10)
         }
 
         fputs("Flushing \(msgs.count) message(s) from \(thread) to webhook\n", stderr)
