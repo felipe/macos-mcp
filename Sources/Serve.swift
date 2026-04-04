@@ -340,24 +340,32 @@ private func downloadFile(_ urlString: String, filename: String?) -> String {
         return "{\"error\": \"Invalid URL\"}"
     }
 
+    // SSRF protection: only allow http/https
+    guard let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme) else {
+        return "{\"error\": \"Only http/https URLs are allowed\"}"
+    }
+
     let downloadDir = NSHomeDirectory() + "/tmp/imessage/downloads"
     try? FileManager.default.createDirectory(atPath: downloadDir, withIntermediateDirectories: true)
 
-    // Determine filename
-    let name: String
+    // Determine filename — strip any path components to prevent traversal
+    let rawName: String
     if let f = filename, !f.isEmpty {
-        name = f
+        rawName = (f as NSString).lastPathComponent  // strip directory components
     } else {
-        // Use last path component or generate one
         let lastComponent = url.lastPathComponent
         if lastComponent.count > 1 && lastComponent.contains(".") {
-            name = lastComponent
+            rawName = lastComponent
         } else {
-            name = "download-\(UUID().uuidString.prefix(8))"
+            rawName = "download-\(UUID().uuidString.prefix(8))"
         }
     }
+    // Extra safety: reject any remaining traversal
+    let name = rawName.replacingOccurrences(of: "..", with: "_")
 
-    let destPath = (downloadDir as NSString).appendingPathComponent(name)
+    guard let destPath = safePath(root: downloadDir, relative: name) else {
+        return "{\"error\": \"Invalid filename\"}"
+    }
 
     let sem = DispatchSemaphore(value: 0)
     var resultJSON = "{\"error\": \"Download failed\"}"
@@ -395,13 +403,30 @@ private func downloadFile(_ urlString: String, filename: String?) -> String {
     return resultJSON
 }
 
+// MARK: - Path Safety
+
+/// Resolve a relative path against a root and verify it doesn't escape.
+/// Returns nil if the path escapes the root (path traversal).
+private func safePath(root: String, relative: String) -> String? {
+    let full = (root as NSString).appendingPathComponent(relative)
+    let resolved = URL(fileURLWithPath: full).standardized.path
+    let resolvedRoot = URL(fileURLWithPath: root).standardized.path
+    guard resolved == resolvedRoot || resolved.hasPrefix(resolvedRoot + "/") else {
+        return nil
+    }
+    return resolved
+}
+
 // MARK: - Vault Helpers
 
 private let vaultRoot = (ProcessInfo.processInfo.environment["OBSIDIAN_VAULT_PATH"]
     ?? NSHomeDirectory() + "/Library/Mobile Documents/com~apple~CloudDocs/The Brass")
 
 private func vaultRead(_ path: String) -> String {
-    let fullPath = (vaultRoot as NSString).appendingPathComponent(path)
+    guard let fullPath = safePath(root: vaultRoot, relative: path) else {
+        log(.error, .vault, "Path traversal blocked", extra: ["path": path])
+        return "{\"error\": \"Invalid path\"}"
+    }
     guard FileManager.default.fileExists(atPath: fullPath) else {
         return "{\"error\": \"File not found: \(path)\"}"
     }
@@ -417,7 +442,10 @@ private func vaultRead(_ path: String) -> String {
 }
 
 private func vaultWrite(_ path: String, content: String) -> String {
-    let fullPath = (vaultRoot as NSString).appendingPathComponent(path)
+    guard let fullPath = safePath(root: vaultRoot, relative: path) else {
+        log(.error, .vault, "Path traversal blocked", extra: ["path": path])
+        return "{\"error\": \"Invalid path\"}"
+    }
     let dir = (fullPath as NSString).deletingLastPathComponent
     do {
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
@@ -431,7 +459,16 @@ private func vaultWrite(_ path: String, content: String) -> String {
 }
 
 private func vaultList(_ path: String) -> String {
-    let fullPath = path.isEmpty ? vaultRoot : (vaultRoot as NSString).appendingPathComponent(path)
+    let fullPath: String
+    if path.isEmpty {
+        fullPath = vaultRoot
+    } else {
+        guard let resolved = safePath(root: vaultRoot, relative: path) else {
+            log(.error, .vault, "Path traversal blocked", extra: ["path": path])
+            return "{\"error\": \"Invalid path\"}"
+        }
+        fullPath = resolved
+    }
     guard let items = try? FileManager.default.contentsOfDirectory(atPath: fullPath) else {
         return "{\"error\": \"Could not list: \(path)\"}"
     }
@@ -557,9 +594,6 @@ private func jsonResponse(status: Int = 200, _ obj: Any) -> Data {
         statusText: status == 200 ? "OK" : "Error",
         headers: [
             "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type, Accept, Mcp-Session-Id",
-            "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
             "Access-Control-Expose-Headers": "Mcp-Session-Id",
         ],
         body: body
@@ -577,9 +611,6 @@ private func sseResponse(sessionId: String, events: [Data]) -> Data {
     resp += "Cache-Control: no-cache\r\n"
     resp += "Connection: close\r\n"
     resp += "Mcp-Session-Id: \(sessionId)\r\n"
-    resp += "Access-Control-Allow-Origin: *\r\n"
-    resp += "Access-Control-Allow-Headers: Content-Type, Accept, Mcp-Session-Id\r\n"
-    resp += "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n"
     resp += "Access-Control-Expose-Headers: Mcp-Session-Id\r\n"
     resp += "\r\n"
     var data = resp.data(using: .utf8)!
@@ -589,15 +620,10 @@ private func sseResponse(sessionId: String, events: [Data]) -> Data {
 
 // MARK: - MCP Request Handler
 
-private var sessions = Set<String>()
-
 private func handleMCPRequest(_ request: HTTPRequest) -> Data {
     // CORS preflight
     if request.method == "OPTIONS" {
         return httpResponse(status: 204, statusText: "No Content", headers: [
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type, Accept, Mcp-Session-Id",
-            "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
             "Access-Control-Expose-Headers": "Mcp-Session-Id",
         ], body: Data())
     }
@@ -605,6 +631,15 @@ private func handleMCPRequest(_ request: HTTPRequest) -> Data {
     // Only POST is used for Streamable HTTP
     guard request.method == "POST" else {
         return jsonResponse(status: 405, jsonRpcError(nil, code: -32000, message: "Method not allowed"))
+    }
+
+    // Auth check: if --mcp-secret is set, require Authorization: Bearer <secret>
+    if let secret = mcpSecret {
+        let auth = request.headers["authorization"] ?? ""
+        guard auth == "Bearer \(secret)" else {
+            log(.warn, .mcp, "Unauthorized MCP request")
+            return jsonResponse(status: 401, ["error": "Unauthorized"])
+        }
     }
 
     // Check Accept header
@@ -628,7 +663,6 @@ private func handleMCPRequest(_ request: HTTPRequest) -> Data {
 
     switch method {
     case "initialize":
-        sessions.insert(sessionId)
         let result = jsonRpcResult(id, [
             "protocolVersion": "2025-11-25",
             "capabilities": ["tools": ["listChanged": true]],
@@ -641,7 +675,6 @@ private func handleMCPRequest(_ request: HTTPRequest) -> Data {
         return httpResponse(status: 200, statusText: "OK", headers: [
             "Content-Type": "text/event-stream",
             "Mcp-Session-Id": sessionId,
-            "Access-Control-Allow-Origin": "*",
             "Access-Control-Expose-Headers": "Mcp-Session-Id",
         ], body: Data())
 
@@ -673,9 +706,11 @@ private func handleMCPRequest(_ request: HTTPRequest) -> Data {
 
 // MARK: - TCP Server
 
+private var mcpSecret: String? = nil
+
 func runServe(args: [String]) {
     var port: UInt16 = 9200
-    var host = "0.0.0.0"
+    var host = "127.0.0.1"
     var webhookURL: String? = nil
     var webhookSecret: String? = nil
     var phone: String = ""
@@ -718,6 +753,9 @@ func runServe(args: [String]) {
         case "--watermark-file":
             i += 1; guard i < args.count else { fputs("--watermark-file requires a value\n", stderr); exit(1) }
             watermarkPath = args[i]
+        case "--mcp-secret":
+            i += 1; guard i < args.count else { fputs("--mcp-secret requires a value\n", stderr); exit(1) }
+            mcpSecret = args[i]
         default:
             break
         }

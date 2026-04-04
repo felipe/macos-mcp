@@ -54,7 +54,7 @@ macos-mcp serve [--port 9200] [--host 0.0.0.0]   # MCP server + iMessage poller
 macos-mcp launch <command> [args...]               # FDA process wrapper
 macos-mcp icloud sync --source DIR --cache DIR --files F1,F2 [-- cmd args...]
 macos-mcp calendar list|events|upcoming|search|create|update|delete [args...]
-macos-mcp messages check|read|list-conversations|attachments [args...]
+macos-mcp messages check|read|list-conversations|attachments|max-rowid [args...]
 macos-mcp send message|file|chat [args...]         # AppleScript via osascript
 macos-mcp typing <contact> start|stop|keepalive    # Typing indicator
 ```
