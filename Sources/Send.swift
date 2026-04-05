@@ -16,17 +16,33 @@ private func runAppleScript(_ script: String) -> (output: String, exitCode: Int3
 
 /// Run AppleScript in-process via NSAppleScript so the macos-mcp binary's
 /// own Accessibility TCC grant applies (required for System Events keystrokes).
-private func runAppleScriptInProcess(_ script: String) -> (output: String, exitCode: Int32) {
+/// Runs with a timeout to prevent hanging when GUI context is unavailable.
+private func runAppleScriptInProcess(_ script: String, timeout: TimeInterval = 5) -> (output: String, exitCode: Int32) {
     guard let appleScript = NSAppleScript(source: script) else {
         return ("Failed to compile AppleScript", 1)
     }
-    var errorInfo: NSDictionary?
-    let result = appleScript.executeAndReturnError(&errorInfo)
-    if let error = errorInfo {
-        let msg = error[NSAppleScript.errorMessage] as? String ?? "Unknown AppleScript error"
-        return (msg, 1)
+
+    var output: String = ""
+    var exitCode: Int32 = 1
+    let done = DispatchSemaphore(value: 0)
+
+    DispatchQueue.global().async {
+        var errorInfo: NSDictionary?
+        let result = appleScript.executeAndReturnError(&errorInfo)
+        if let error = errorInfo {
+            output = error[NSAppleScript.errorMessage] as? String ?? "Unknown AppleScript error"
+            exitCode = 1
+        } else {
+            output = result.stringValue ?? ""
+            exitCode = 0
+        }
+        done.signal()
     }
-    return (result.stringValue ?? "", 0)
+
+    if done.wait(timeout: .now() + timeout) == .timedOut {
+        return ("AppleScript timed out after \(Int(timeout))s", 1)
+    }
+    return (output, exitCode)
 }
 
 // MARK: - Send Message

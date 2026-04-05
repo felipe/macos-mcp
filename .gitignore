@@ -17,6 +17,14 @@ tmp/
 # Private knowledge base (symlinked locally)
 Oracle
 
+# Build artifacts
+.build/
+macos-mcp
+
+# Virtual environments
+.venv/
+__pycache__/
+
 # Editor
 *.swp
 *.swo

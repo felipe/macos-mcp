@@ -1,113 +1,114 @@
 # macos-mcp
 
-Unified macOS system services for AI tools. Single binary, single Full Disk Access grant. Also works as a Claude Code plugin.
+macOS system services for AI tools. Single Swift binary — runs as a CLI, MCP server, or Claude Code plugin.
 
 ## Install
 
-### Claude Code Plugin
-
 ```bash
-/plugin marketplace add felipe/macos-mcp
-/plugin install macos@macos-mcp
+make           # Build (requires Xcode CLT)
+make install   # Build + restart launchd service
 ```
 
-### Standalone
+Grant Full Disk Access to the `macos-mcp` binary in System Settings > Privacy & Security.
 
-Pre-built universal binary (arm64 + x86_64) ships in the repo. Or build from source:
+## MCP Server
+
+Exposes iMessage, Calendar, file transfer, and Obsidian vault tools over the [MCP protocol](https://modelcontextprotocol.io) (Streamable HTTP transport). Remote AI agents connect to it to interact with macOS services.
 
 ```bash
-make  # Requires Xcode Command Line Tools
+# Run MCP server with iMessage poller
+macos-mcp serve --port 9200 \
+  --webhook-url "http://hermes.example.com:8644/webhooks/imessage" \
+  --webhook-secret "your-hmac-secret" \
+  --phone "5551234567"
 ```
 
-Grant Full Disk Access to the `macos-mcp` binary in System Settings > Privacy & Security > Full Disk Access.
+When `--webhook-url` is provided, the server also polls `chat.db` for inbound messages and POSTs them to the webhook with HMAC-SHA256 signing. Typing indicators are managed automatically (start on message, keepalive every 25s, stop when reply detected).
 
-## Usage
+### MCP Tools
+
+**iMessage**: `send_imessage`, `send_to_chat`, `send_file`, `check_messages`, `read_conversation`, `list_conversations`, `max_rowid`, `typing_indicator`
+
+**Calendar**: `calendar_list`, `calendar_upcoming`, `calendar_events`, `calendar_search`, `calendar_create`
+
+**Files**: `download_file` (URL → local path), `send_file` (local path → iMessage)
+
+**Obsidian Vault**: `vault_read`, `vault_write`, `vault_list`, `vault_search`
+
+## CLI Usage
 
 ```bash
 # iMessage
-macos-mcp messages check --phone 4155551234 --since 60
-macos-mcp messages read --phone 4155551234 --limit 10
-macos-mcp messages list-conversations --limit 20
-macos-mcp messages attachments --rowid 12345 --convert-heic
-macos-mcp send message 4155551234 "Hello!"
-macos-mcp send file 4155551234 /path/to/image.png
-macos-mcp send chat "chat123456" "Hello group!"
-macos-mcp typing 4155551234 start
+macos-mcp messages check --phone 5551234567 --after-rowid 4800
+macos-mcp messages read --phone 5551234567 --limit 10
+macos-mcp send message 5551234567 "Hello!"
+macos-mcp send file 5551234567 /path/to/image.png
 
 # Calendar
-macos-mcp calendar list
-macos-mcp calendar events --from 2026-03-23 --to 2026-03-24
 macos-mcp calendar upcoming --hours 24
-macos-mcp calendar search "meeting" --days 30
 macos-mcp calendar create --cal CAL_ID --title "Meeting" --start 2026-03-24T14:00:00Z --end 2026-03-24T15:00:00Z
-macos-mcp calendar update --id EVENT_ID --title "New title"
-macos-mcp calendar delete --id EVENT_ID
 
-# iCloud file sync (for launchd agents)
-macos-mcp icloud sync --source "My Vault" --cache ~/.local/share/myapp/cache --files "file1.md,file2.yml"
-macos-mcp icloud sync --source "My Vault" --cache /tmp/cache --files "data.yml" -- /path/to/script.sh
+# iCloud file sync
+macos-mcp icloud sync --source "My Vault" --cache /tmp/cache --files "stack.md" -- ./script.sh
 
-# FDA process wrapper (for launchd agents)
+# FDA process wrapper
 macos-mcp launch /path/to/script.sh
 ```
 
 All output is JSON to stdout. Errors are JSON to stderr.
 
-## Autonomous Daemon
-
-Background daemon that monitors incoming iMessages and spawns Claude Code agent sessions to respond.
-
-```bash
-# Configure via environment variables
-export IMESSAGE_CONTACT_PHONE="4155551234"
-export IMESSAGE_CONTACT_NAME="John Doe"
-
-# Optional: agent persona (SoulSpec convention)
-export MACOS_MCP_AGENT_PATH="/path/to/agent/spec"
-
-# Start
-skills/imessage/daemon/imessage-auto-reply-daemon.sh
-```
-
-Or manage via launchd — see [daemon/README.md](skills/imessage/daemon/README.md).
-
 ## Two-Account Model
 
-Designed to run on the **agent's macOS account** — a separate user with its own Apple ID.
+Runs on the **agent's macOS account** — a separate user with its own Apple ID.
 
 - **iMessage**: The agent has its own phone number. You text the agent like a contact.
-- **Calendar**: The agent has its own iCloud calendar, shared with the user. The user shares their calendar with the agent (read-only).
+- **Calendar**: The agent has its own iCloud calendar, shared with the user.
+
+## Launchd Service
+
+```bash
+make install   # Build + restart
+make restart   # Restart only
+```
+
+Plist: `~/Library/LaunchAgents/com.macos-mcp.serve.plist` — `KeepAlive: true`.
+
+Logs (structured JSON): `~/.local/share/work-work/logs/launchd-macos-mcp-serve.err.log`
+
+```bash
+# Watch errors
+tail -f ~/.local/share/work-work/logs/launchd-macos-mcp-serve.err.log | jq 'select(.level == "error")'
+
+# Poller health
+tail -f ~/.local/share/work-work/logs/launchd-macos-mcp-serve.err.log | jq 'select(.msg == "Heartbeat")'
+```
 
 ## Requirements
 
 - macOS 13+ (Ventura)
 - Messages app signed in to iMessage
 - Full Disk Access for the `macos-mcp` binary
+- Binary signed with `macos-mcp-dev` certificate (ad-hoc breaks TCC)
 - Accessibility permission for Terminal (typing indicator)
 - Calendar access permission (TCC prompt on first run)
 
 ## Project Structure
 
 ```
-macos-mcp              # Pre-built universal binary
-Sources/               # Swift source files
+Sources/
   main.swift           # CLI router
-  Shared.swift         # JSON output, date parsing, helpers
-  Launch.swift         # FDA process wrapper
-  ICloud.swift         # iCloud Drive file sync
-  Calendar.swift       # EventKit operations
+  Serve.swift          # MCP server + poller + typing + vault tools
+  Shared.swift         # JSON output, process runner with timeouts
   Messages.swift       # SQLite message queries
-  Attachments.swift    # Attachment processing + HEIC conversion
   Send.swift           # AppleScript wrappers (send, typing)
-Makefile               # Build universal binary
-.claude-plugin/        # Plugin manifests
-commands/              # Slash commands (/imessage-daemon)
+  Calendar.swift       # EventKit operations
+  Attachments.swift    # Attachment processing + HEIC conversion
+  ICloud.swift         # iCloud Drive file sync
+  Launch.swift         # FDA process wrapper
+Makefile               # Build, install (build + restart), clean
 skills/
   imessage/
-    daemon/            # Auto-reply daemon
-    SKILL.md
-  calendar/
-    SKILL.md
+    daemon/            # Legacy auto-reply daemon (replaced by serve mode)
 ```
 
 ## License
