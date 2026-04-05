@@ -19,21 +19,20 @@ Direct command execution — used by local scripts, launchd agents, and the MCP 
 ### MCP Server Mode (`macos-mcp serve`)
 Runs an MCP server (Streamable HTTP) that exposes all tools to remote agents. Includes a built-in iMessage poller that watches chat.db and forwards inbound messages to a webhook.
 
-**Current deployment**: Hermes Agent on K8s (kube-node) connects to the MCP server via Tailscale. Hermes handles the AI (GPT-5.4), sessions, and memory. The Mac host handles macOS-specific operations (iMessage, calendar, typing indicators, Obsidian vault writes).
+The MCP server exposes tools to any MCP-compatible agent. The built-in poller watches chat.db and forwards inbound messages to a webhook for AI processing.
 
 ```
 [Phone] ←iMessage→ [Messages.app]
                         ↕ chat.db
               [macos-mcp serve] (Mac host, launchd)
-                ├── poller: watches chat.db → POST to hermes webhook
+                ├── poller: watches chat.db → POST to webhook
                 ├── MCP server: tools for send/read/calendar/vault
                 └── typing: indicators with keepalive + auto-stop
-                        ↕ Tailscale
-              [Hermes Agent] (K8s pod)
-                ├── GPT-5.4 via OpenAI Codex
-                ├── Session persistence per contact
-                ├── Obsidian vault (Obsidian Vault) mounted at /vault (ro)
-                └── Webhook platform for inbound messages
+                        ↕ network
+              [AI Agent] (any MCP client)
+                ├── Receives webhook, processes message
+                ├── Calls MCP tools to reply, read vault, etc.
+                └── Session persistence per contact
 ```
 
 ## Two-Account Model
@@ -84,28 +83,22 @@ Build: `make` — Restart service after build: `make install`
 - `download_file` — download URL to Mac, returns local path
 - `send_file` — send local file via iMessage
 
-### Obsidian Vault (Obsidian Vault)
+### Obsidian Vault
 - `vault_read` — read a file (relative path)
 - `vault_write` — write/update a file
 - `vault_list` — list directory contents
 - `vault_search` — search by filename or content
 
-Vault root: `OBSIDIAN_VAULT_PATH` env var or `~/Library/Mobile Documents/com~apple~CloudDocs/Obsidian Vault`
+Vault root: `OBSIDIAN_VAULT_PATH` env var or `~/Library/Mobile Documents/com~apple~CloudDocs/Obsidian`
 
-## Hermes Integration
+## Connecting an AI Agent
 
-Hermes Agent runs on K8s with:
-- MCP server config pointing at `http://<mac-tailscale-ip>:9200/mcp`
-- Webhook platform on port 8644 with HMAC-signed `imessage` route
-- `OBSIDIAN_VAULT_PATH=/vault` (hostPath mount, read-only)
-- Session persistence patched via ConfigMap (stable key from `{from}` field)
-- USER.md + MEMORY.md seeded in `/opt/data/`
+Any MCP-compatible agent can connect to the serve endpoint:
 
-### Key hermes config paths (inside pod)
-- `/opt/data/config.yaml` — model, toolsets, MCP servers
-- `/opt/data/USER.md` — user profile (seeded from Obsidian Vault)
-- `/opt/data/MEMORY.md` — memory index
-- `/vault/` — Obsidian Vault (Obsidian vault, read-only mount)
+1. Point the agent's MCP client at `http://<mac-ip>:9200/mcp`
+2. Set up a webhook route for inbound messages (the poller POSTs with HMAC-SHA256)
+3. The agent gets all MCP tools (send, read, calendar, vault) automatically
+4. Optional: set `--mcp-secret` for bearer token auth on the MCP endpoint
 
 ## Logging
 

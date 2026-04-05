@@ -1,6 +1,144 @@
 import Foundation
 import SQLite3
 
+// MARK: - In-Process Message Polling
+
+/// Lightweight message returned by the in-process poller.
+struct PolledMessage {
+    let rowid: Int64
+    let text: String
+    let from: String   // handle_id (phone number)
+    let chat: String   // chat_identifier
+    let date: String   // ISO 8601
+}
+
+/// Persistent SQLite connection for the poller. Reads chat.db in-process
+/// instead of shelling out, avoiding WAL visibility bugs and FDA subprocess issues.
+/// Thread safety: confine each instance to a single serial queue.
+class ChatDBConnection {
+    private var db: OpaquePointer?
+    private let path: String
+
+    init(path: String = NSString("~/Library/Messages/chat.db").expandingTildeInPath) {
+        self.path = path
+        open()
+    }
+
+    deinit {
+        close()
+    }
+
+    private func open() {
+        var handle: OpaquePointer?
+        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX
+        guard sqlite3_open_v2(path, &handle, flags, nil) == SQLITE_OK else {
+            fputs("ChatDBConnection: cannot open \(path)\n", stderr)
+            return
+        }
+        db = handle
+        sqlite3_busy_timeout(db, 5000)
+    }
+
+    func close() {
+        if let db = db { sqlite3_close(db); self.db = nil }
+    }
+
+    func reconnect() {
+        close()
+        open()
+    }
+
+    /// Check for new inbound messages after the given ROWID.
+    func checkMessages(afterRowid: Int64, phone: String?) -> [PolledMessage] {
+        guard let db = db else { return [] }
+
+        let sql: String
+        let hasPhone = phone != nil && !phone!.isEmpty
+
+        if hasPhone {
+            sql = """
+                SELECT m.ROWID, COALESCE(m.text, '') as text, m.date,
+                       h.id as handle_id, c.chat_identifier,
+                       m.attributedBody
+                FROM message m
+                JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+                JOIN chat c ON cmj.chat_id = c.ROWID
+                JOIN chat_handle_join chj ON c.ROWID = chj.chat_id
+                JOIN handle h ON chj.handle_id = h.ROWID
+                WHERE h.id LIKE ? AND m.is_from_me = 0 AND m.ROWID > ?
+                ORDER BY m.ROWID ASC
+                LIMIT 50
+                """
+        } else {
+            sql = """
+                SELECT m.ROWID, COALESCE(m.text, '') as text, m.date,
+                       '' as handle_id, '' as chat_identifier,
+                       m.attributedBody
+                FROM message m
+                WHERE m.is_from_me = 0 AND m.ROWID > ?
+                ORDER BY m.ROWID ASC
+                LIMIT 50
+                """
+        }
+
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            let err = String(cString: sqlite3_errmsg(db))
+            fputs("ChatDBConnection: prepare failed: \(err)\n", stderr)
+            return []
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        if hasPhone {
+            let pattern = "%\(phone!)%"
+            sqlite3_bind_text(stmt, 1, (pattern as NSString).utf8String, -1,
+                              unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            sqlite3_bind_int64(stmt, 2, afterRowid)
+        } else {
+            sqlite3_bind_int64(stmt, 1, afterRowid)
+        }
+
+        var results: [PolledMessage] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let rowid = sqlite3_column_int64(stmt, 0)
+            var text = String(cString: sqlite3_column_text(stmt, 1))
+
+            // Decode attributedBody if text is empty
+            if text.isEmpty {
+                let blobLen = sqlite3_column_bytes(stmt, 5)
+                if blobLen > 0, let blobPtr = sqlite3_column_blob(stmt, 5) {
+                    let data = Data(bytes: blobPtr, count: Int(blobLen))
+                    text = decodeAttributedBody(data) ?? ""
+                }
+            }
+
+            let dateNanos = sqlite3_column_int64(stmt, 2)
+            let handleId = String(cString: sqlite3_column_text(stmt, 3))
+            let chatId = String(cString: sqlite3_column_text(stmt, 4))
+
+            results.append(PolledMessage(
+                rowid: rowid,
+                text: text,
+                from: handleId,
+                chat: chatId,
+                date: appleNanosToISO(dateNanos)
+            ))
+        }
+        return results
+    }
+
+    /// Get the current maximum ROWID in the message table.
+    func maxRowid() -> Int64 {
+        guard let db = db else { return 0 }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT MAX(ROWID) FROM message", -1, &stmt, nil) == SQLITE_OK else {
+            return 0
+        }
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW ? sqlite3_column_int64(stmt, 0) : 0
+    }
+}
+
 // MARK: - Database
 
 private let chatDBPath = NSString("~/Library/Messages/chat.db").expandingTildeInPath
@@ -56,7 +194,7 @@ private func query(_ db: OpaquePointer, sql: String, bind: ((OpaquePointer) -> V
 
 // MARK: - attributedBody Decoding
 
-private func decodeAttributedBody(_ data: Data) -> String? {
+func decodeAttributedBody(_ data: Data) -> String? {
     // Try NSKeyedUnarchiver first (proper decoding)
     if let attrString = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSAttributedString.self, from: data) {
         let text = attrString.string.trimmingCharacters(in: .whitespacesAndNewlines)

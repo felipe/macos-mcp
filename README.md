@@ -49,7 +49,7 @@ macos-mcp calendar upcoming --hours 24
 macos-mcp calendar create --cal CAL_ID --title "Meeting" --start 2026-03-24T14:00:00Z --end 2026-03-24T15:00:00Z
 
 # iCloud file sync
-macos-mcp icloud sync --source "Obsidian Vault" --cache /tmp/cache --files "stack.md" -- ./script.sh
+macos-mcp icloud sync --source "My Vault" --cache /tmp/cache --files "stack.md" -- ./script.sh
 
 # FDA process wrapper
 macos-mcp launch /path/to/script.sh

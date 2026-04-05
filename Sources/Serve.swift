@@ -100,7 +100,7 @@ private let mcpTools: [[String: Any]] = [
     ],
     [
         "name": "vault_read",
-        "description": "Read a file from the Obsidian vault (Obsidian Vault). Path is relative to vault root.",
+        "description": "Read a file from the Obsidian vault (the Obsidian vault). Path is relative to vault root.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -111,7 +111,7 @@ private let mcpTools: [[String: Any]] = [
     ],
     [
         "name": "vault_write",
-        "description": "Write or update a file in the Obsidian vault (Obsidian Vault). Path is relative to vault root.",
+        "description": "Write or update a file in the Obsidian vault (the Obsidian vault). Path is relative to vault root.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -420,7 +420,7 @@ private func safePath(root: String, relative: String) -> String? {
 // MARK: - Vault Helpers
 
 private let vaultRoot = (ProcessInfo.processInfo.environment["OBSIDIAN_VAULT_PATH"]
-    ?? NSHomeDirectory() + "/Library/Mobile Documents/com~apple~CloudDocs/Obsidian Vault")
+    ?? NSHomeDirectory() + "/Library/Mobile Documents/com~apple~CloudDocs/Obsidian")
 
 private func vaultRead(_ path: String) -> String {
     guard let fullPath = safePath(root: vaultRoot, relative: path) else {
@@ -860,40 +860,68 @@ private func sendAndClose(_ connection: NWConnection, _ data: Data) {
     })
 }
 
+// MARK: - WAL File Watcher
+
+/// Watch the chat.db WAL file for writes. Returns nil if file doesn't exist.
+private func startWALWatcher(semaphore: DispatchSemaphore, queue: DispatchQueue) -> DispatchSourceFileSystemObject? {
+    let walPath = NSString("~/Library/Messages/chat.db-wal").expandingTildeInPath
+    let fd = Darwin.open(walPath, O_EVTONLY)
+    guard fd >= 0 else {
+        log(.warn, .poller, "WAL file not found, using timer-only polling")
+        return nil
+    }
+
+    let source = DispatchSource.makeFileSystemObjectSource(
+        fileDescriptor: fd, eventMask: [.write, .extend], queue: queue
+    )
+    source.setEventHandler { semaphore.signal() }
+    source.setCancelHandler { Darwin.close(fd) }
+    source.resume()
+    log(.info, .poller, "WAL watcher active")
+    return source
+}
+
 // MARK: - iMessage Poller
 
 /// Polls chat.db for new messages and POSTs them to the hermes webhook.
+/// Reads SQLite in-process (no subprocess) and watches the WAL file for changes.
 private func startPoller(
     webhookURL: String, webhookSecret: String, phone: String,
     pollInterval: TimeInterval, debounceWindow: TimeInterval,
     watermarkPath: String
 ) {
-    let binary = ProcessInfo.processInfo.arguments[0]
     let pollerQueue = DispatchQueue(label: "imessage-poller")
 
     pollerQueue.async {
+        let connection = ChatDBConnection()
         var watermark = loadWatermark(watermarkPath)
 
         // Initialize watermark if needed
         if watermark == 0 {
-            let result = runProcess(binary, arguments: ["messages", "max-rowid"])
-            if let data = result.stdout.data(using: .utf8),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let maxRowid = json["max_rowid"] as? Int {
-                watermark = maxRowid
-                saveWatermark(watermarkPath, watermark)
-            }
+            watermark = Int(connection.maxRowid())
+            if watermark > 0 { saveWatermark(watermarkPath, watermark) }
         }
 
-        log(.info, .poller, "Poller started", extra: ["watermark": watermark, "phone": phone.isEmpty ? "all" : phone, "webhook": webhookURL])
+        log(.info, .poller, "Poller started", extra: [
+            "watermark": watermark,
+            "phone": phone.isEmpty ? "all" : phone,
+            "webhook": webhookURL,
+            "mode": "in-process",
+        ])
+
+        // WAL watcher: signals semaphore on DB changes for instant pickup
+        let walSemaphore = DispatchSemaphore(value: 0)
+        let walSource = startWALWatcher(semaphore: walSemaphore, queue: pollerQueue)
 
         var pending: [(text: String, thread: String, rowid: Int)] = []
         var lastMessageTime: Date = .distantPast
         var lastHeartbeat: Date = Date()
-        let heartbeatInterval: TimeInterval = 300  // log heartbeat every 5 min
+        let heartbeatInterval: TimeInterval = 300
+        var consecutiveErrors = 0
 
         while true {
-            Thread.sleep(forTimeInterval: pollInterval)
+            // Wait for WAL change or fallback timer
+            _ = walSemaphore.wait(timeout: .now() + pollInterval)
 
             // Periodic heartbeat
             if Date().timeIntervalSince(lastHeartbeat) >= heartbeatInterval {
@@ -901,40 +929,38 @@ private func startPoller(
                 lastHeartbeat = Date()
             }
 
-            // Poll for new messages
-            var checkArgs = ["messages", "check", "--after-rowid", String(watermark)]
-            if !phone.isEmpty { checkArgs += ["--phone", phone] }
+            // In-process query — no subprocess
+            let messages = connection.checkMessages(
+                afterRowid: Int64(watermark),
+                phone: phone.isEmpty ? nil : phone
+            )
 
-            let result = runProcess(binary, arguments: checkArgs)
-            guard let data = result.stdout.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let messages = json["messages"] as? [[String: Any]] else {
-                // Flush if debounce expired
-                if !pending.isEmpty && Date().timeIntervalSince(lastMessageTime) >= debounceWindow {
-                    flushToWebhook(pending, webhookURL: webhookURL, webhookSecret: webhookSecret)
-                    pending.removeAll()
+            if messages.isEmpty && consecutiveErrors > 0 {
+                // Previous errors + empty results = possible stale connection
+                consecutiveErrors += 1
+                if consecutiveErrors >= 10 {
+                    log(.warn, .poller, "Reconnecting after \(consecutiveErrors) empty polls")
+                    connection.reconnect()
+                    consecutiveErrors = 0
                 }
-                continue
+            } else {
+                consecutiveErrors = 0
             }
 
             for msg in messages {
-                let rowid = msg["rowid"] as? Int ?? 0
+                let rowid = Int(msg.rowid)
                 if rowid > watermark {
                     watermark = rowid
                     saveWatermark(watermarkPath, watermark)
                 }
 
-                // Skip outbound
-                if msg["is_from_me"] as? Bool == true || msg["is_from_me"] as? Int == 1 {
-                    continue
-                }
+                if msg.text.isEmpty { continue }
 
-                let text = msg["text"] as? String ?? ""
-                let thread = msg["chat"] as? String ?? msg["from"] as? String ?? "unknown"
-                if text.isEmpty { continue }
+                let thread = msg.chat.isEmpty ? msg.from : msg.chat
+                if thread.isEmpty { continue }
 
-                log(.info, .poller, "New message", extra: ["rowid": rowid, "thread": thread, "preview": String(text.prefix(80))])
-                pending.append((text: text, thread: thread, rowid: rowid))
+                log(.info, .poller, "New message", extra: ["rowid": rowid, "thread": thread, "preview": String(msg.text.prefix(80))])
+                pending.append((text: msg.text, thread: thread, rowid: rowid))
                 lastMessageTime = Date()
             }
 
@@ -944,6 +970,10 @@ private func startPoller(
                 pending.removeAll()
             }
         }
+
+        // Cleanup (unreachable in practice but good form)
+        walSource?.cancel()
+        connection.close()
     }
 }
 
@@ -962,8 +992,6 @@ private func flushToWebhook(
     _ messages: [(text: String, thread: String, rowid: Int)],
     webhookURL: String, webhookSecret: String
 ) {
-    let binary = ProcessInfo.processInfo.arguments[0]
-
     // Group by thread
     var threads: [String: [(text: String, rowid: Int)]] = [:]
     for msg in messages {
@@ -990,9 +1018,12 @@ private func flushToWebhook(
 
         // Run ALL typing indicator work in background — never block the poller
         DispatchQueue.global().async {
+            let binary = ProcessInfo.processInfo.arguments[0]
             log(.info, .typing, "Starting typing indicator", extra: ["thread": thread])
             runProcess(binary, arguments: ["typing", contact, "start"], timeout: 10)
 
+            // In-process DB connection for max-rowid checks (own connection for thread safety)
+            let typingDB = ChatDBConnection()
             let keepaliveInterval: TimeInterval = 25
             let maxWait: TimeInterval = 300
             let startTime = Date()
@@ -1002,11 +1033,8 @@ private func flushToWebhook(
                 Thread.sleep(forTimeInterval: keepaliveInterval)
 
                 // Check if an outbound message appeared (hermes replied)
-                let result = runProcess(binary, arguments: ["messages", "max-rowid"])
-                if let data = result.stdout.data(using: .utf8),
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let currentMax = json["max_rowid"] as? Int,
-                   currentMax > baseRowid {
+                let currentMax = Int(typingDB.maxRowid())
+                if currentMax > baseRowid {
                     log(.info, .typing, "Outbound detected, stopping")
                     break
                 }
@@ -1014,6 +1042,7 @@ private func flushToWebhook(
                 runProcess(binary, arguments: ["typing", contact, "keepalive"], timeout: 10)
             }
 
+            typingDB.close()
             runProcess(binary, arguments: ["typing", contact, "stop"], timeout: 10)
         }
 
