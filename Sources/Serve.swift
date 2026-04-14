@@ -1197,7 +1197,7 @@ private func startPoller(
         let walSemaphore = DispatchSemaphore(value: 0)
         let walSource = startWALWatcher(semaphore: walSemaphore, queue: pollerQueue)
 
-        var pending: [(text: String, thread: String, rowid: Int)] = []
+        var pending: [(text: String, thread: String, chatGuid: String, from: String, rowid: Int)] = []
         var lastMessageTime: Date = .distantPast
         var lastHeartbeat: Date = Date()
         let heartbeatInterval: TimeInterval = 300
@@ -1246,8 +1246,9 @@ private func startPoller(
                 let thread = msg.chat.isEmpty ? msg.from : msg.chat
                 if thread.isEmpty { continue }
 
+                let chatGuid = msg.chatGuid.isEmpty ? msg.chat : msg.chatGuid
                 log(.info, .poller, "New message", extra: ["rowid": rowid, "thread": thread, "preview": String(msg.text.prefix(80))])
-                pending.append((text: msg.text, thread: thread, rowid: rowid))
+                pending.append((text: msg.text, thread: thread, chatGuid: chatGuid, from: msg.from, rowid: rowid))
                 lastMessageTime = Date()
             }
 
@@ -1276,22 +1277,25 @@ private func saveWatermark(_ path: String, _ value: Int) {
 }
 
 private func flushToWebhook(
-    _ messages: [(text: String, thread: String, rowid: Int)],
+    _ messages: [(text: String, thread: String, chatGuid: String, from: String, rowid: Int)],
     webhookURL: String, webhookSecret: String
 ) {
     // Group by thread
-    var threads: [String: [(text: String, rowid: Int)]] = [:]
+    var threads: [String: [(text: String, chatGuid: String, from: String, rowid: Int)]] = [:]
     for msg in messages {
-        threads[msg.thread, default: []].append((text: msg.text, rowid: msg.rowid))
+        threads[msg.thread, default: []].append((text: msg.text, chatGuid: msg.chatGuid, from: msg.from, rowid: msg.rowid))
     }
 
     for (thread, msgs) in threads {
         let combinedText = msgs.map(\.text).joined(separator: "\n")
         let maxRowid = msgs.map(\.rowid).max() ?? 0
+        let chatGuid = msgs.last?.chatGuid ?? thread
+        let senderHandle = msgs.last?.from ?? thread
         let payload: [String: Any] = [
             "event": "imessage",
-            "from": thread,
+            "from": senderHandle,
             "text": combinedText,
+            "chat_id": chatGuid,
             "message_count": msgs.count,
             "rowids": msgs.map(\.rowid),
         ]
