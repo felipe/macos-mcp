@@ -7,9 +7,13 @@ import SQLite3
 struct PolledMessage {
     let rowid: Int64
     let text: String
-    let from: String   // handle_id (phone number)
-    let chat: String   // chat_identifier
-    let date: String   // ISO 8601
+    let from: String       // handle_id (phone number)
+    let chat: String       // chat_identifier
+    let chatGuid: String   // c.guid (e.g. "iMessage;-;+15551234567")
+    let date: String       // ISO 8601
+    let service: String    // "iMessage", "SMS", etc.
+    let guid: String       // message GUID
+    let hasAttachments: Bool
 }
 
 /// Persistent SQLite connection for the poller. Reads chat.db in-process
@@ -52,34 +56,27 @@ class ChatDBConnection {
     func checkMessages(afterRowid: Int64, phone: String?) -> [PolledMessage] {
         guard let db = db else { return [] }
 
-        let sql: String
-        let hasPhone = phone != nil && !phone!.isEmpty
-
-        if hasPhone {
-            sql = """
-                SELECT m.ROWID, COALESCE(m.text, '') as text, m.date,
-                       h.id as handle_id, c.chat_identifier,
-                       m.attributedBody
-                FROM message m
-                JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
-                JOIN chat c ON cmj.chat_id = c.ROWID
-                JOIN chat_handle_join chj ON c.ROWID = chj.chat_id
-                JOIN handle h ON chj.handle_id = h.ROWID
-                WHERE h.id LIKE ? AND m.is_from_me = 0 AND m.ROWID > ?
-                ORDER BY m.ROWID ASC
-                LIMIT 50
-                """
-        } else {
-            sql = """
-                SELECT m.ROWID, COALESCE(m.text, '') as text, m.date,
-                       '' as handle_id, '' as chat_identifier,
-                       m.attributedBody
-                FROM message m
-                WHERE m.is_from_me = 0 AND m.ROWID > ?
-                ORDER BY m.ROWID ASC
-                LIMIT 50
-                """
-        }
+        // Match the official channel plugin's query structure:
+        // - Join handle via m.handle_id (sender), not chat_handle_join (participants)
+        // - Fetch ALL messages, filter is_from_me in code
+        let sql = """
+            SELECT m.ROWID, COALESCE(m.text, '') as text, m.date,
+                   m.is_from_me,
+                   COALESCE(h.id, '') as handle_id,
+                   COALESCE(c.chat_identifier, '') as chat_identifier,
+                   COALESCE(c.guid, '') as chat_guid,
+                   m.attributedBody,
+                   COALESCE(m.service, '') as service,
+                   COALESCE(m.guid, '') as msg_guid,
+                   COALESCE(m.cache_has_attachments, 0) as has_attachments
+            FROM message m
+            JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+            JOIN chat c ON c.ROWID = cmj.chat_id
+            LEFT JOIN handle h ON h.ROWID = m.handle_id
+            WHERE m.ROWID > ?
+            ORDER BY m.ROWID ASC
+            LIMIT 50
+            """
 
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
@@ -89,39 +86,48 @@ class ChatDBConnection {
         }
         defer { sqlite3_finalize(stmt) }
 
-        if hasPhone {
-            let pattern = "%\(phone!)%"
-            sqlite3_bind_text(stmt, 1, (pattern as NSString).utf8String, -1,
-                              unsafeBitCast(-1, to: sqlite3_destructor_type.self))
-            sqlite3_bind_int64(stmt, 2, afterRowid)
-        } else {
-            sqlite3_bind_int64(stmt, 1, afterRowid)
-        }
+        sqlite3_bind_int64(stmt, 1, afterRowid)
 
+        let hasPhone = phone != nil && !phone!.isEmpty
         var results: [PolledMessage] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let rowid = sqlite3_column_int64(stmt, 0)
             var text = String(cString: sqlite3_column_text(stmt, 1))
+            let isFromMe = sqlite3_column_int(stmt, 3) != 0
+            let handleId = String(cString: sqlite3_column_text(stmt, 4))
+            let chatId = String(cString: sqlite3_column_text(stmt, 5))
+            let chatGuid = String(cString: sqlite3_column_text(stmt, 6))
+
+            // Filter in code, not SQL (matches official plugin)
+            if isFromMe { continue }
+
+            // Phone filter
+            if hasPhone && !handleId.contains(phone!) { continue }
 
             // Decode attributedBody if text is empty
             if text.isEmpty {
-                let blobLen = sqlite3_column_bytes(stmt, 5)
-                if blobLen > 0, let blobPtr = sqlite3_column_blob(stmt, 5) {
+                let blobLen = sqlite3_column_bytes(stmt, 7)
+                if blobLen > 0, let blobPtr = sqlite3_column_blob(stmt, 7) {
                     let data = Data(bytes: blobPtr, count: Int(blobLen))
                     text = decodeAttributedBody(data) ?? ""
                 }
             }
 
             let dateNanos = sqlite3_column_int64(stmt, 2)
-            let handleId = String(cString: sqlite3_column_text(stmt, 3))
-            let chatId = String(cString: sqlite3_column_text(stmt, 4))
+            let service = String(cString: sqlite3_column_text(stmt, 8))
+            let msgGuid = String(cString: sqlite3_column_text(stmt, 9))
+            let hasAttachments = sqlite3_column_int(stmt, 10) != 0
 
             results.append(PolledMessage(
                 rowid: rowid,
                 text: text,
                 from: handleId,
                 chat: chatId,
-                date: appleNanosToISO(dateNanos)
+                chatGuid: chatGuid,
+                date: appleNanosToISO(dateNanos),
+                service: service,
+                guid: msgGuid,
+                hasAttachments: hasAttachments
             ))
         }
         return results
@@ -136,6 +142,172 @@ class ChatDBConnection {
         }
         defer { sqlite3_finalize(stmt) }
         return sqlite3_step(stmt) == SQLITE_ROW ? sqlite3_column_int64(stmt, 0) : 0
+    }
+
+    /// Get the filesystem path of the first image attachment for a message.
+    func fetchFirstImagePath(messageRowid: Int64) -> String? {
+        guard let db = db else { return nil }
+        let sql = """
+            SELECT a.filename, a.mime_type
+            FROM attachment a
+            JOIN message_attachment_join maj ON a.ROWID = maj.attachment_id
+            WHERE maj.message_id = ?
+            ORDER BY a.ROWID ASC
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, messageRowid)
+
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let filenamePtr = sqlite3_column_text(stmt, 0),
+                  let mimePtr = sqlite3_column_text(stmt, 1) else { continue }
+            let mimeType = String(cString: mimePtr)
+            if mimeType.hasPrefix("image/") {
+                let filename = String(cString: filenamePtr)
+                let expanded = NSString(string: filename).expandingTildeInPath
+                if FileManager.default.fileExists(atPath: expanded) {
+                    return expanded
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Read conversation history. Returns messages oldest-first.
+    func readConversation(phone: String?, limit: Int) -> [[String: Any]] {
+        guard let db = db else { return [] }
+
+        let sql: String
+        let hasPhone = phone != nil && !phone!.isEmpty
+        if hasPhone {
+            sql = """
+                SELECT m.ROWID, COALESCE(m.text, '') as text, m.is_from_me, m.date,
+                       h.id as handle_id, COALESCE(m.guid, '') as guid,
+                       m.attributedBody, m.cache_has_attachments
+                FROM message m
+                JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+                JOIN chat c ON cmj.chat_id = c.ROWID
+                JOIN chat_handle_join chj ON c.ROWID = chj.chat_id
+                JOIN handle h ON chj.handle_id = h.ROWID
+                WHERE h.id LIKE ?
+                ORDER BY m.date DESC
+                LIMIT ?
+                """
+        } else {
+            sql = """
+                SELECT m.ROWID, COALESCE(m.text, '') as text, m.is_from_me, m.date,
+                       COALESCE(h.id, '') as handle_id, COALESCE(m.guid, '') as guid,
+                       m.attributedBody, m.cache_has_attachments
+                FROM message m
+                LEFT JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+                LEFT JOIN chat c ON cmj.chat_id = c.ROWID
+                LEFT JOIN chat_handle_join chj ON c.ROWID = chj.chat_id
+                LEFT JOIN handle h ON chj.handle_id = h.ROWID
+                ORDER BY m.date DESC
+                LIMIT ?
+                """
+        }
+
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+
+        if hasPhone {
+            let pattern = "%\(phone!)%"
+            sqlite3_bind_text(stmt, 1, (pattern as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            sqlite3_bind_int64(stmt, 2, Int64(limit))
+        } else {
+            sqlite3_bind_int64(stmt, 1, Int64(limit))
+        }
+
+        var results: [[String: Any]] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let rowid = sqlite3_column_int64(stmt, 0)
+            var text = String(cString: sqlite3_column_text(stmt, 1))
+            let isFromMe = sqlite3_column_int(stmt, 2) != 0
+            let dateNanos = sqlite3_column_int64(stmt, 3)
+            let handleId = String(cString: sqlite3_column_text(stmt, 4))
+            let guid = String(cString: sqlite3_column_text(stmt, 5))
+
+            if text.isEmpty {
+                let blobLen = sqlite3_column_bytes(stmt, 6)
+                if blobLen > 0, let blobPtr = sqlite3_column_blob(stmt, 6) {
+                    text = decodeAttributedBody(Data(bytes: blobPtr, count: Int(blobLen))) ?? ""
+                }
+            }
+
+            let hasAtt = sqlite3_column_int(stmt, 7) != 0
+            var msg: [String: Any] = [
+                "rowid": NSNumber(value: rowid),
+                "guid": guid,
+                "date": appleNanosToISO(dateNanos),
+                "text": text,
+                "is_from_me": NSNumber(value: isFromMe),
+                "handle": handleId,
+            ]
+            if hasAtt, let imgPath = fetchFirstImagePath(messageRowid: rowid) {
+                msg["image_path"] = imgPath
+            }
+            results.append(msg)
+        }
+        return results.reversed() // oldest first
+    }
+
+    /// List recent conversations with metadata.
+    func listConversations(limit: Int) -> [[String: Any]] {
+        guard let db = db else { return [] }
+
+        let sql = """
+            SELECT c.ROWID, c.chat_identifier, COALESCE(c.display_name, '') as display_name,
+                   c.style, MAX(m.date) as last_message_date, COUNT(m.ROWID) as message_count
+            FROM chat c
+            JOIN chat_message_join cmj ON c.ROWID = cmj.chat_id
+            JOIN message m ON cmj.message_id = m.ROWID
+            GROUP BY c.ROWID
+            ORDER BY last_message_date DESC
+            LIMIT ?
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, Int64(limit))
+
+        var results: [[String: Any]] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let chatRowid = sqlite3_column_int64(stmt, 0)
+            let chatId = String(cString: sqlite3_column_text(stmt, 1))
+            let displayName = String(cString: sqlite3_column_text(stmt, 2))
+            let style = sqlite3_column_int64(stmt, 3)
+            let lastDate = sqlite3_column_int64(stmt, 4)
+            let count = sqlite3_column_int64(stmt, 5)
+
+            // Get participants
+            let handleSql = """
+                SELECT h.id FROM handle h
+                JOIN chat_handle_join chj ON h.ROWID = chj.handle_id
+                WHERE chj.chat_id = ?
+                """
+            var hStmt: OpaquePointer?
+            var participants: [String] = []
+            if sqlite3_prepare_v2(db, handleSql, -1, &hStmt, nil) == SQLITE_OK {
+                sqlite3_bind_int64(hStmt, 1, chatRowid)
+                while sqlite3_step(hStmt) == SQLITE_ROW {
+                    participants.append(String(cString: sqlite3_column_text(hStmt, 0)))
+                }
+                sqlite3_finalize(hStmt)
+            }
+
+            results.append([
+                "chat_identifier": chatId,
+                "display_name": displayName,
+                "is_group": NSNumber(value: style == 45),
+                "participants": participants,
+                "last_message_date": appleNanosToISO(lastDate),
+                "message_count": NSNumber(value: count),
+            ])
+        }
+        return results
     }
 }
 
@@ -265,7 +437,8 @@ private func messagesCheck(phone: String?, sinceMinutes: Int?, afterRowid: Int64
 
     let selectColsNoHandle = """
         m.ROWID, COALESCE(m.text, '') as text, m.is_from_me, m.date,
-        '' as handle_id, '' as chat_identifier,
+        COALESCE(h.id, '') as handle_id,
+        COALESCE(c.chat_identifier, '') as chat_identifier,
         COALESCE(m.guid, '') as guid,
         COALESCE(m.thread_originator_guid, '') as thread_originator_guid,
         m.attributedBody
@@ -294,6 +467,10 @@ private func messagesCheck(phone: String?, sinceMinutes: Int?, afterRowid: Int64
             let sql = """
                 SELECT \(selectColsNoHandle)
                 FROM message m
+                LEFT JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+                LEFT JOIN chat c ON cmj.chat_id = c.ROWID
+                LEFT JOIN chat_handle_join chj ON c.ROWID = chj.chat_id
+                LEFT JOIN handle h ON chj.handle_id = h.ROWID
                 WHERE m.is_from_me = 0 AND m.ROWID > ?
                 ORDER BY m.ROWID ASC
                 LIMIT 50
@@ -329,6 +506,10 @@ private func messagesCheck(phone: String?, sinceMinutes: Int?, afterRowid: Int64
             let sql = """
                 SELECT \(selectColsNoHandle)
                 FROM message m
+                LEFT JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+                LEFT JOIN chat c ON cmj.chat_id = c.ROWID
+                LEFT JOIN chat_handle_join chj ON c.ROWID = chj.chat_id
+                LEFT JOIN handle h ON chj.handle_id = h.ROWID
                 WHERE m.is_from_me = 0 AND m.date > ?
                 ORDER BY m.date DESC
                 LIMIT 50
@@ -416,10 +597,14 @@ private func messagesRead(phone: String?, limit: Int) {
     } else {
         let sql = """
             SELECT m.ROWID, COALESCE(m.text, '') as text, m.is_from_me, m.date,
-                   '' as handle_id, COALESCE(m.guid, '') as guid,
+                   COALESCE(h.id, '') as handle_id, COALESCE(m.guid, '') as guid,
                    COALESCE(m.thread_originator_guid, '') as thread_originator_guid,
                    m.attributedBody
             FROM message m
+            LEFT JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+            LEFT JOIN chat c ON cmj.chat_id = c.ROWID
+            LEFT JOIN chat_handle_join chj ON c.ROWID = chj.chat_id
+            LEFT JOIN handle h ON chj.handle_id = h.ROWID
             ORDER BY m.date DESC
             LIMIT ?
             """

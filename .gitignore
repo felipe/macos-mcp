@@ -21,6 +21,11 @@ Oracle
 .build/
 macos-mcp
 
+# Claude local config (contains env-specific settings)
+.claude/
+.claude-plugin/.mcp.json
+.mcp.json
+
 # Virtual environments
 .venv/
 __pycache__/

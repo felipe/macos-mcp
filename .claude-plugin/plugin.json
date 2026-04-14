@@ -12,10 +12,22 @@
     "calendar",
     "eventkit",
     "messages",
+    "messaging",
+    "channel",
     "automation",
     "daemon",
     "agent",
     "mcp"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "mcpServers": {
+    "macos-mcp": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/macos-mcp",
+      "args": ["stdio"],
+      "env": {
+        "MACOS_MCP_OWNER_PHONE": "${MACOS_MCP_OWNER_PHONE}",
+        "MACOS_MCP_OWNER_NAME": "${MACOS_MCP_OWNER_NAME}"
+      }
+    }
+  }
 }

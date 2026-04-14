@@ -83,25 +83,18 @@ private func sendMessage(contact: String, text: String) {
 // MARK: - Send to Chat
 
 private func sendToChat(chatId: String, text: String) {
-    let chatIdEsc = escapeForAppleScript(chatId)
-    let messageEsc = escapeForAppleScript(text)
+    // Use argv-based AppleScript (no escaping issues) matching the official plugin.
+    // "chat id" without service scoping handles any;-; and iMessage;-; GUIDs.
+    let result = runProcess("/usr/bin/osascript", arguments: [
+        "-e", "on run argv",
+        "-e", "  tell application \"Messages\" to send (item 1 of argv) to chat id (item 2 of argv)",
+        "-e", "end run",
+        "--", text, chatId,
+    ])
 
-    let script = """
-    tell application "Messages"
-        try
-            set targetService to 1st account whose service type = iMessage
-            set targetChat to a reference to text chat id "\(chatIdEsc)" of targetService
-            send "\(messageEsc)" to targetChat
-            return "sent"
-        on error errMsg
-            return "error:" & errMsg
-        end try
-    end tell
-    """
-
-    let (output, exitCode) = runAppleScript(script)
-    if exitCode != 0 || output.hasPrefix("error:") {
-        exitWithError("Failed to send to chat: \(output)")
+    if result.exitCode != 0 {
+        let err = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        exitWithError("Failed to send to chat: \(err)")
     }
 
     printJSON(["sent": true, "chat": chatId])
@@ -159,6 +152,55 @@ private func sendFile(contact: String, filePath: String) {
     }
 
     printJSON(["sent": true, "contact": contact, "file": absPath])
+}
+
+// MARK: - Send File to Chat
+
+private func sendFileToChat(chatId: String, filePath: String) {
+    let fm = FileManager.default
+
+    let absPath: String
+    if filePath.hasPrefix("/") {
+        absPath = filePath
+    } else if filePath.hasPrefix("~") {
+        absPath = NSString(string: filePath).expandingTildeInPath
+    } else {
+        absPath = fm.currentDirectoryPath + "/" + filePath
+    }
+
+    guard fm.fileExists(atPath: absPath) else {
+        exitWithError("File not found: \(absPath)")
+    }
+
+    // Stage file into Messages sandbox to avoid error 25
+    let stagingDir = NSString("~/Library/Messages/Attachments/_outgoing").expandingTildeInPath
+    try? fm.createDirectory(atPath: stagingDir, withIntermediateDirectories: true)
+
+    let ext = (absPath as NSString).pathExtension
+    let tmpName = "staged-\(UUID().uuidString.prefix(8))" + (ext.isEmpty ? "" : ".\(ext)")
+    let stagedPath = (stagingDir as NSString).appendingPathComponent(tmpName)
+
+    do {
+        try fm.copyItem(atPath: absPath, toPath: stagedPath)
+    } catch {
+        exitWithError("Failed to stage file: \(error.localizedDescription)")
+    }
+
+    // Use argv-based AppleScript matching the official plugin.
+    let result = runProcess("/usr/bin/osascript", arguments: [
+        "-e", "on run argv",
+        "-e", "  tell application \"Messages\" to send (POSIX file (item 1 of argv)) to chat id (item 2 of argv)",
+        "-e", "end run",
+        "--", stagedPath, chatId,
+    ])
+
+    if result.exitCode != 0 {
+        try? fm.removeItem(atPath: stagedPath)
+        let err = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        exitWithError("Failed to send file to chat: \(err)")
+    }
+
+    printJSON(["sent": true, "chat": chatId, "file": absPath])
 }
 
 // MARK: - Typing Indicator
@@ -278,6 +320,12 @@ func runSend(subcommand: String, args: [String]) {
             }
         }
         sendToChat(chatId: chatId, text: text)
+
+    case "file-to-chat":
+        guard args.count >= 2 else {
+            exitWithError("send file-to-chat requires: <chat-id> <path>")
+        }
+        sendFileToChat(chatId: args[0], filePath: args[1])
 
     default:
         exitWithError("Unknown send subcommand: \(subcommand). Use message, file, or chat.")

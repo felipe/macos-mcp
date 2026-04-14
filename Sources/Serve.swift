@@ -19,6 +19,18 @@ private enum LogComponent: String {
     case server = "server"
 }
 
+/// Log file handle — set via MACOS_MCP_LOG_FILE env var.
+/// When set, structured logs go to the file AND stderr.
+private let logFileHandle: FileHandle? = {
+    guard let path = ProcessInfo.processInfo.environment["MACOS_MCP_LOG_FILE"] else { return nil }
+    let dir = (path as NSString).deletingLastPathComponent
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    if !FileManager.default.fileExists(atPath: path) {
+        FileManager.default.createFile(atPath: path, contents: nil)
+    }
+    return FileHandle(forWritingAtPath: path)
+}()
+
 private func log(_ level: LogLevel, _ component: LogComponent, _ message: String, extra: [String: Any]? = nil) {
     let ts = ISO8601DateFormatter().string(from: Date())
     var entry: [String: Any] = [
@@ -32,9 +44,19 @@ private func log(_ level: LogLevel, _ component: LogComponent, _ message: String
     }
     if let data = try? JSONSerialization.data(withJSONObject: entry, options: []),
        let json = String(data: data, encoding: .utf8) {
-        fputs(json + "\n", stderr)
+        let line = json + "\n"
+        fputs(line, stderr)
+        if let fh = logFileHandle, let lineData = line.data(using: .utf8) {
+            fh.seekToEndOfFile()
+            fh.write(lineData)
+        }
     } else {
-        fputs("[\(ts)] [\(level.rawValue)] [\(component.rawValue)] \(message)\n", stderr)
+        let line = "[\(ts)] [\(level.rawValue)] [\(component.rawValue)] \(message)\n"
+        fputs(line, stderr)
+        if let fh = logFileHandle, let lineData = line.data(using: .utf8) {
+            fh.seekToEndOfFile()
+            fh.write(lineData)
+        }
     }
 }
 
@@ -50,6 +72,23 @@ private let mcpServerInfo: [String: Any] = [
 ]
 
 private let mcpTools: [[String: Any]] = [
+    [
+        "name": "reply",
+        "description": "Reply to an iMessage conversation. Use the chat_id from the channel notification.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "chat_id": ["type": "string", "description": "Chat GUID from the channel notification meta"],
+                "text": ["type": "string", "description": "Message text to send"],
+                "files": [
+                    "type": "array",
+                    "items": ["type": "string"],
+                    "description": "Absolute file paths to attach. Sent as separate messages after the text.",
+                ] as [String: Any],
+            ],
+            "required": ["chat_id", "text"],
+        ] as [String: Any],
+    ],
     [
         "name": "send_imessage",
         "description": "Send an iMessage (or SMS fallback) to a contact phone number",
@@ -261,6 +300,27 @@ private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
     var args: [String] = []
 
     switch name {
+    case "reply":
+        let chatId = input["chat_id"] as? String ?? ""
+        let text = input["text"] as? String ?? ""
+        let textResult = runProcess(binary, arguments: ["send", "chat", chatId, text])
+        if textResult.exitCode != 0 {
+            let err = textResult.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            log(.error, .mcp, "Reply failed", extra: ["chat": chatId, "error": err])
+            return err.isEmpty ? "{\"error\": \"Failed to send reply\"}" : err
+        }
+        var fileSent = 0
+        if let files = input["files"] as? [String] {
+            for file in files {
+                let fileResult = runProcess(binary, arguments: ["send", "file-to-chat", chatId, file])
+                if fileResult.exitCode == 0 {
+                    fileSent += 1
+                } else {
+                    log(.error, .mcp, "File send failed", extra: ["file": file])
+                }
+            }
+        }
+        return fileSent > 0 ? "{\"sent\": true, \"parts\": \(1 + fileSent)}" : "{\"sent\": true}"
     case "send_imessage":
         args = ["send", "message", input["contact"] as? String ?? "", input["text"] as? String ?? ""]
     case "send_to_chat":
@@ -277,21 +337,51 @@ private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
         return vaultList(input["path"] as? String ?? "")
     case "vault_search":
         return vaultSearch(input["query"] as? String ?? "", contentSearch: input["content_search"] as? Bool ?? false)
+    // Message tools run in-process to avoid TCC/FDA issues with subprocesses
     case "check_messages":
-        args = ["messages", "check"]
-        if let phone = input["phone"] as? String, !phone.isEmpty { args += ["--phone", phone] }
-        if let rowid = input["after_rowid"] as? Int { args += ["--after-rowid", String(rowid)] }
-        if let rowid = input["after_rowid"] as? Double { args += ["--after-rowid", String(Int(rowid))] }
+        let conn = ChatDBConnection()
+        defer { conn.close() }
+        let phone = input["phone"] as? String
+        let afterRowid: Int64
+        if let r = input["after_rowid"] as? Int { afterRowid = Int64(r) }
+        else if let r = input["after_rowid"] as? Double { afterRowid = Int64(r) }
+        else { afterRowid = max(0, conn.maxRowid() - 50) }
+        let msgs = conn.checkMessages(afterRowid: afterRowid, phone: phone)
+        let result: [[String: Any]] = msgs.map { msg in
+            var m: [String: Any] = [
+                "rowid": NSNumber(value: msg.rowid), "guid": msg.guid,
+                "date": msg.date, "text": msg.text,
+                "from": msg.from, "chat": msg.chatGuid.isEmpty ? msg.chat : msg.chatGuid,
+            ]
+            if msg.hasAttachments, let img = conn.fetchFirstImagePath(messageRowid: msg.rowid) {
+                m["image_path"] = img
+            }
+            return m
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: ["messages": result], options: [.prettyPrinted]),
+              let json = String(data: data, encoding: .utf8) else { return "{\"messages\":[]}" }
+        return json
     case "read_conversation":
-        args = ["messages", "read"]
-        if let phone = input["phone"] as? String, !phone.isEmpty { args += ["--phone", phone] }
+        let conn = ChatDBConnection()
+        defer { conn.close() }
+        let phone = input["phone"] as? String
         let limit = (input["limit"] as? Int) ?? (input["limit"] as? Double).map { Int($0) } ?? 20
-        args += ["--limit", String(limit)]
+        let msgs = conn.readConversation(phone: phone, limit: limit)
+        guard let data = try? JSONSerialization.data(withJSONObject: ["messages": msgs], options: [.prettyPrinted]),
+              let json = String(data: data, encoding: .utf8) else { return "{\"messages\":[]}" }
+        return json
     case "list_conversations":
+        let conn = ChatDBConnection()
+        defer { conn.close() }
         let limit = (input["limit"] as? Int) ?? (input["limit"] as? Double).map { Int($0) } ?? 10
-        args = ["messages", "list-conversations", "--limit", String(limit)]
+        let convos = conn.listConversations(limit: limit)
+        guard let data = try? JSONSerialization.data(withJSONObject: ["conversations": convos], options: [.prettyPrinted]),
+              let json = String(data: data, encoding: .utf8) else { return "{\"conversations\":[]}" }
+        return json
     case "max_rowid":
-        args = ["messages", "max-rowid"]
+        let conn = ChatDBConnection()
+        defer { conn.close() }
+        return "{\"max_rowid\": \(conn.maxRowid())}"
     case "typing_indicator":
         args = ["typing", input["contact"] as? String ?? "", input["action"] as? String ?? ""]
     case "calendar_list":
@@ -515,6 +605,187 @@ private func vaultSearch(_ query: String, contentSearch: Bool) -> String {
     return json
 }
 
+// MARK: - Stdio MCP Transport
+
+/// Thread-safe stdout writer for the stdio transport.
+/// Both the main stdin reader and the background poller write JSON-RPC to stdout.
+private let stdoutLock = NSLock()
+
+private func stdioWrite(_ obj: [String: Any]) {
+    guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
+    var out = data
+    out.append(0x0A) // newline
+    stdoutLock.lock()
+    FileHandle.standardOutput.write(out)
+    stdoutLock.unlock()
+}
+
+/// Stdio MCP server — reads JSON-RPC from stdin, writes to stdout.
+/// Includes a background poller that pushes incoming iMessages as channel notifications.
+func runStdio() {
+    log(.info, .mcp, "Stdio transport started")
+
+    // --- Access control, echo suppression, SMS filter ---
+    let accessConfig = AccessConfig.load()
+    let echoTracker = EchoTracker()
+    let allowSMS = ProcessInfo.processInfo.environment["MACOS_MCP_ALLOW_SMS"] == "true"
+
+    // --- Channel poller: starts immediately, like the official plugin ---
+    let pollerQueue = DispatchQueue(label: "stdio-poller")
+    let initConn = ChatDBConnection()
+    var watermark = initConn.maxRowid()
+    initConn.close()
+
+    if accessConfig.isEmpty {
+        log(.warn, .poller, "No access config — all messages blocked. Set MACOS_MCP_OWNER_PHONE or create ~/.config/macos-mcp/access.json")
+    } else {
+        log(.info, .poller, "Channel poller started", extra: [
+            "watermark": watermark,
+            "allowed_phones": accessConfig.allowFrom.count,
+            "allowed_groups": accessConfig.allowedGroups.count,
+        ])
+    }
+
+    // Poll on a 1-second timer (same approach as the official channel plugin).
+    // WAL dispatch sources are unreliable — macOS checkpoints can silence them.
+    let pollerSource = DispatchSource.makeTimerSource(queue: pollerQueue)
+    pollerSource.schedule(deadline: .now() + 1, repeating: 1.0)
+
+    pollerSource.setEventHandler {
+        let conn = ChatDBConnection()
+        let messages = conn.checkMessages(afterRowid: watermark, phone: nil)
+        for msg in messages {
+            watermark = msg.rowid
+
+            // SMS/RCS filter — only iMessage by default
+            if !allowSMS && !msg.service.isEmpty && msg.service != "iMessage" { continue }
+
+            // Access control — check sender/group against allowlist
+            if !accessConfig.isAllowed(from: msg.from, chatGuid: msg.chatGuid) { continue }
+
+            // Need text or an attachment to deliver
+            let text = msg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty || msg.hasAttachments else { continue }
+
+            // Echo suppression — skip messages that match recent sends
+            if echoTracker.isEcho(text) {
+                log(.info, .poller, "Suppressed echo", extra: ["rowid": msg.rowid])
+                continue
+            }
+
+            // Build notification meta with chat GUID and message GUID
+            var meta: [String: Any] = [
+                "chat_id": msg.chatGuid.isEmpty ? msg.chat : msg.chatGuid,
+                "message_id": msg.guid.isEmpty ? String(msg.rowid) : msg.guid,
+                "user": ProcessInfo.processInfo.environment["MACOS_MCP_OWNER_NAME"] ?? msg.from,
+                "ts": msg.date,
+            ]
+
+            // Surface first image attachment path
+            if msg.hasAttachments {
+                if let imagePath = conn.fetchFirstImagePath(messageRowid: msg.rowid) {
+                    meta["image_path"] = imagePath
+                }
+            }
+
+            let content = text.isEmpty ? "(image)" : text
+            let notification: [String: Any] = [
+                "jsonrpc": "2.0",
+                "method": "notifications/claude/channel",
+                "params": [
+                    "content": content,
+                    "meta": meta,
+                ] as [String: Any],
+            ]
+            stdioWrite(notification)
+            // Log the full notification payload for debugging
+            if let notifData = try? JSONSerialization.data(withJSONObject: notification, options: [.sortedKeys]),
+               let notifJSON = String(data: notifData, encoding: .utf8) {
+                log(.info, .poller, "Channel notification sent", extra: [
+                    "rowid": msg.rowid, "from": msg.from, "service": msg.service,
+                    "payload": notifJSON,
+                ])
+            } else {
+                log(.info, .poller, "Channel notification sent", extra: ["rowid": msg.rowid, "from": msg.from])
+            }
+
+            // Start typing indicator while Claude thinks
+            let contact = msg.from.hasPrefix("+") ? String(msg.from.dropFirst()) : msg.from
+            let binary = ProcessInfo.processInfo.arguments[0]
+            let baseRowid = watermark
+            DispatchQueue.global().async {
+                runProcess(binary, arguments: ["typing", contact, "start"], timeout: 10)
+                let typingDB = ChatDBConnection()
+                let startTime = Date()
+                while Date().timeIntervalSince(startTime) < 300 {
+                    Thread.sleep(forTimeInterval: 25)
+                    if Int(typingDB.maxRowid()) > baseRowid { break }
+                    runProcess(binary, arguments: ["typing", contact, "keepalive"], timeout: 10)
+                }
+                typingDB.close()
+                runProcess(binary, arguments: ["typing", contact, "stop"], timeout: 10)
+            }
+        }
+        conn.close()
+    }
+    pollerSource.resume()
+
+    // --- Main loop: read JSON-RPC from stdin ---
+    while let line = readLine(strippingNewline: true) {
+        guard !line.isEmpty,
+              let data = line.data(using: .utf8),
+              let jsonObj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            continue
+        }
+
+        let method = jsonObj["method"] as? String ?? ""
+        let id = jsonObj["id"]
+        let params = jsonObj["params"] as? [String: Any] ?? [:]
+
+        // Notifications have no id — acknowledge silently
+        guard id != nil else { continue }
+
+        let result: [String: Any]
+        switch method {
+        case "initialize":
+            result = jsonRpcResult(id, [
+                "protocolVersion": "2024-11-05",
+                "capabilities": [
+                    "tools": ["listChanged": false],
+                    "experimental": [
+                        "claude/channel": [:] as [String: Any],
+                    ] as [String: Any],
+                ] as [String: Any],
+                "serverInfo": mcpServerInfo,
+            ])
+        case "tools/list":
+            result = jsonRpcResult(id, ["tools": mcpTools])
+        case "tools/call":
+            let toolName = params["name"] as? String ?? ""
+            let toolArgs = params["arguments"] as? [String: Any] ?? [:]
+            log(.info, .mcp, "Tool call", extra: ["tool": toolName])
+            let output = dispatchTool(toolName, toolArgs)
+            // Track sends for echo suppression
+            if ["send_imessage", "send_to_chat", "reply"].contains(toolName),
+               let text = toolArgs["text"] as? String {
+                echoTracker.trackSend(text)
+            }
+            result = jsonRpcResult(id, [
+                "content": [["type": "text", "text": output]],
+            ])
+        case "ping":
+            result = jsonRpcResult(id, [:])
+        default:
+            result = jsonRpcError(id, code: -32601, message: "Method not found: \(method)")
+        }
+
+        stdioWrite(result)
+    }
+
+    pollerSource.cancel()
+    log(.info, .mcp, "Stdio transport closed")
+}
+
 // MARK: - JSON-RPC Helpers
 
 private func jsonRpcResult(_ id: Any?, _ result: [String: Any]) -> [String: Any] {
@@ -664,7 +935,7 @@ private func handleMCPRequest(_ request: HTTPRequest) -> Data {
     switch method {
     case "initialize":
         let result = jsonRpcResult(id, [
-            "protocolVersion": "2025-11-25",
+            "protocolVersion": "2024-11-05",
             "capabilities": ["tools": ["listChanged": true]],
             "serverInfo": mcpServerInfo,
         ])
@@ -775,10 +1046,22 @@ func runServe(args: [String]) {
 
     let params = NWParameters.tcp
     params.allowLocalEndpointReuse = true
-    // Disable Nagle for low-latency responses
 
-
-    let listener = try! NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
+    let nwPort = NWEndpoint.Port(rawValue: port)!
+    var listener: NWListener!
+    for attempt in 1...10 {
+        do {
+            listener = try NWListener(using: params, on: nwPort)
+            break
+        } catch {
+            if attempt == 10 {
+                log(.error, .server, "Failed to bind port \(port) after 10 attempts: \(error)")
+                exit(1)
+            }
+            log(.warn, .server, "Port \(port) busy, retrying (\(attempt)/10)…")
+            Thread.sleep(forTimeInterval: 1.0)
+        }
+    }
 
     listener.newConnectionHandler = { connection in
         connection.start(queue: serverQueue)
@@ -894,6 +1177,7 @@ private func startPoller(
 
     pollerQueue.async {
         let connection = ChatDBConnection()
+        let webhookAllowSMS = ProcessInfo.processInfo.environment["MACOS_MCP_ALLOW_SMS"] == "true"
         var watermark = loadWatermark(watermarkPath)
 
         // Initialize watermark if needed
@@ -953,6 +1237,9 @@ private func startPoller(
                     watermark = rowid
                     saveWatermark(watermarkPath, watermark)
                 }
+
+                // SMS/RCS filter — only iMessage by default
+                if !webhookAllowSMS && !msg.service.isEmpty && msg.service != "iMessage" { continue }
 
                 if msg.text.isEmpty { continue }
 

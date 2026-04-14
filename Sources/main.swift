@@ -40,6 +40,9 @@ case "typing":
 case "serve":
     runServe(args: Array(args.dropFirst()))
 
+case "stdio":
+    runStdio()
+
 case "--version", "version":
     printJSON(["version": appVersion, "name": "macos-mcp"])
     exit(0)
@@ -65,6 +68,7 @@ func printUsage() -> Never {
       send <subcommand> [args...]             Send messages via AppleScript
       typing <contact> <start|stop|keepalive> iMessage typing indicator
       serve [--port 9200] [--host 0.0.0.0]   Run MCP server (Streamable HTTP)
+      stdio                                 Run MCP server (stdio transport)
 
     Calendar subcommands:
       list                                    List all visible calendars

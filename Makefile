@@ -19,7 +19,7 @@ $(STAGING): $(SOURCES)
 	swiftc $(SWIFTFLAGS) -target x86_64-apple-macosx13.0 $(FRAMEWORKS) $(LIBS) $(SOURCES) -o .build/$(BINARY)-x86_64
 	lipo -create .build/$(BINARY)-arm64 .build/$(BINARY)-x86_64 -output $(STAGING)
 	rm -f .build/$(BINARY)-arm64 .build/$(BINARY)-x86_64
-	codesign --force --sign "macos-mcp-dev" --identifier "com.felipe.macos-mcp" $(STAGING)
+	codesign --force --sign - --identifier "com.felipe.macos-mcp" $(STAGING)
 
 # Deploy: stop service, copy signed binary, restart
 deploy: $(STAGING)
