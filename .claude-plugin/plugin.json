@@ -19,15 +19,5 @@
     "agent",
     "mcp"
   ],
-  "license": "MIT",
-  "mcpServers": {
-    "macos-mcp": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/macos-mcp",
-      "args": ["stdio"],
-      "env": {
-        "MACOS_MCP_OWNER_PHONE": "${MACOS_MCP_OWNER_PHONE}",
-        "MACOS_MCP_OWNER_NAME": "${MACOS_MCP_OWNER_NAME}"
-      }
-    }
-  }
+  "license": "MIT"
 }
