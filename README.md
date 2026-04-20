@@ -5,15 +5,29 @@ macOS system services for AI tools. Single Swift binary — runs as a CLI, MCP s
 ## Install
 
 ```bash
-make           # Build (requires Xcode CLT)
+make build     # Compile-only build (unsigned)
+make           # Signed build (requires Xcode CLT + signing cert)
 make install   # Build + restart launchd service
 ```
 
 Grant Full Disk Access to the `macos-mcp` binary in System Settings > Privacy & Security.
 
+## Testing
+
+This repo now splits tests into two layers:
+
+```bash
+make test-logic         # SwiftPM logic tests (Linux or macOS, requires swift)
+make test-logic-docker  # same logic tests in a Docker Swift image
+make test-build         # macOS-only compile + MCP smoke test for scoped_read/scoped_write
+```
+
+- Logic tests cover pure allowlisted-path and markdown-write behavior in `ScopedFilesCore.swift`
+- Build tests compile the binary on macOS and exercise the real MCP server via `scripts/smoke-scoped-files.sh`
+
 ## MCP Server
 
-Exposes iMessage, Calendar, file transfer, and Obsidian vault tools over the [MCP protocol](https://modelcontextprotocol.io) (Streamable HTTP transport). Remote AI agents connect to it to interact with macOS services.
+Exposes iMessage, Calendar, file transfer, Obsidian vault, and allowlisted file tools over the [MCP protocol](https://modelcontextprotocol.io) (Streamable HTTP transport). Remote AI agents connect to it to interact with macOS services.
 
 ```bash
 # Run MCP server with iMessage poller
@@ -34,6 +48,14 @@ When `--webhook-url` is provided, the server also polls `chat.db` for inbound me
 **Files**: `download_file` (URL → local path), `send_file` (local path → iMessage)
 
 **Obsidian Vault**: `vault_read`, `vault_write`, `vault_list`, `vault_search`
+
+**Allowlisted Files**: `scoped_read`, `scoped_write` — read/write under configured named paths using `path_name` + relative `path`; `scoped_write` supports `upsert`, `append-section`, and `supersede`
+
+Configure allowlisted paths with `ALLOWED_PATHS_JSON`, for example:
+
+```bash
+export ALLOWED_PATHS_JSON='{"notes":"/Users/agent/Documents/Notes","ops":"/Users/agent/Documents/Ops"}'
+```
 
 ## CLI Usage
 
@@ -97,7 +119,8 @@ tail -f ~/.local/share/work-work/logs/launchd-macos-mcp-serve.err.log | jq 'sele
 ```
 Sources/
   main.swift           # CLI router
-  Serve.swift          # MCP server + poller + typing + vault tools
+  Serve.swift          # MCP server + poller + typing + vault/scoped-file tools
+  ScopedFilesCore.swift# Allowlisted path logic + markdown transforms + audit writes
   Shared.swift         # JSON output, process runner with timeouts
   Messages.swift       # SQLite message queries
   Send.swift           # AppleScript wrappers (send, typing)
@@ -105,7 +128,12 @@ Sources/
   Attachments.swift    # Attachment processing + HEIC conversion
   ICloud.swift         # iCloud Drive file sync
   Launch.swift         # FDA process wrapper
-Makefile               # Build, install (build + restart), clean
+Tests/
+  ScopedFilesCoreTests/# Linux/macOS logic tests for allowlisted path behavior
+scripts/
+  smoke-scoped-files.sh# macOS MCP smoke test for scoped_read/scoped_write
+Package.swift          # SwiftPM manifest for logic tests
+Makefile               # Build, install, and test targets
 skills/
   imessage/
     daemon/            # Legacy auto-reply daemon (replaced by serve mode)
