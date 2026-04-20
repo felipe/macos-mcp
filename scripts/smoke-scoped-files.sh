@@ -6,6 +6,22 @@ if [[ "$(uname)" != "Darwin" ]]; then
   exit 1
 fi
 
+# Preflight: we shell out to curl + python3 extensively. macOS 12+ ships
+# both at /usr/bin/, but surface a clear error when they're absent rather
+# than failing partway through with a confusing trace.
+missing=()
+for tool in curl python3; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    missing+=("$tool")
+  fi
+done
+if (( ${#missing[@]} > 0 )); then
+  echo "smoke-scoped-files.sh: required tools not on PATH: ${missing[*]}" >&2
+  echo "  curl: ships with macOS (Command Line Tools)." >&2
+  echo "  python3: ships with macOS 12+ or install via 'xcode-select --install'." >&2
+  exit 1
+fi
+
 BINARY="${1:-.build/macos-mcp-unsigned}"
 PORT="${PORT:-9320}"
 SECRET="${MCP_SECRET:-test-secret}"

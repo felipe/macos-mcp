@@ -552,11 +552,19 @@ private func vaultSearch(_ query: String, contentSearch: Bool) -> String {
 
 // MARK: - Scoped File Helpers
 
-private let scopedFilesService = ScopedFilesService(
-    allowedPaths: loadAllowedPaths(from: ProcessInfo.processInfo.environment),
-    auditLogPath: ProcessInfo.processInfo.environment["ALLOWED_PATHS_AUDIT_LOG_PATH"]
-        ?? NSHomeDirectory() + "/.local/share/work-work/logs/allowed-paths-audit.log"
-)
+// Fresh ScopedFilesService per request so there is no shared mutable state
+// across concurrent MCP tool calls. The service itself holds only immutable
+// config (`allowedPaths`, `auditLogPath`). Re-reading ALLOWED_PATHS_JSON on
+// each call is trivial overhead and picks up env changes without requiring
+// a process restart. Audit-log writes are serialized internally via a
+// module-level queue in ScopedFilesCore.
+private var scopedFilesService: ScopedFilesService {
+    ScopedFilesService(
+        allowedPaths: loadAllowedPaths(from: ProcessInfo.processInfo.environment),
+        auditLogPath: ProcessInfo.processInfo.environment["ALLOWED_PATHS_AUDIT_LOG_PATH"]
+            ?? NSHomeDirectory() + "/.local/share/work-work/logs/allowed-paths-audit.log"
+    )
+}
 
 private func scopedRead(pathName: String, path: String) -> String {
     do {

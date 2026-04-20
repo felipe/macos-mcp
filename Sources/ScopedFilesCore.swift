@@ -25,14 +25,16 @@ struct ScopedFilesError: Error {
 struct ScopedReadResult {
     let pathName: String
     let path: String
-    let absolutePath: String
     let content: String
 
+    // NOTE: intentionally omits absolute_path. Exposing absolute filesystem
+    // paths to MCP clients reveals user names, directory layout, and the
+    // configured allowlist root. Callers already know the allowed root for
+    // `path_name` out-of-band; they don't need the server to echo it back.
     func jsonObject() -> [String: Any] {
         [
             "path_name": pathName,
             "path": path,
-            "absolute_path": absolutePath,
             "content": content,
         ]
     }
@@ -53,15 +55,17 @@ struct ScopedWriteRequest {
 struct ScopedWriteResult {
     let pathName: String
     let writtenPath: String
-    let absolutePath: String
     let sha256: String
     let timestamp: String
 
+    // NOTE: intentionally omits absolute_path for the same reason as
+    // ScopedReadResult — avoid leaking host filesystem layout to clients.
+    // The server still records the absolute path in the audit log, where
+    // it's useful for forensics.
     func jsonObject() -> [String: Any] {
         [
             "path_name": pathName,
             "written_path": writtenPath,
-            "absolute_path": absolutePath,
             "sha256": sha256,
             "timestamp": timestamp,
         ]
@@ -422,11 +426,17 @@ private func rotateFileIfNeeded(at path: String, maxBytes: UInt64 = 5_000_000, k
     try fm.moveItem(atPath: path, toPath: first)
 }
 
+// Serial queue shared across ScopedFilesService instances so concurrent
+// `scoped_write` calls don't interleave rotate + append on the audit log
+// (or corrupt the log during rotation). Scoped to module-level because
+// the queue must be a singleton regardless of how many service instances
+// are constructed per-request.
+private let auditLogQueue = DispatchQueue(label: "com.macos-mcp.scoped-files.audit", qos: .userInitiated)
+
 final class ScopedFilesService {
     let allowedPaths: [String: String]
     let auditLogPath: String
     private let now: () -> Date
-    private let isoFormatter = ISO8601DateFormatter()
 
     init(allowedPaths: [String: String], auditLogPath: String, now: @escaping () -> Date = Date.init) {
         self.allowedPaths = allowedPaths
@@ -466,7 +476,6 @@ final class ScopedFilesService {
         return ScopedReadResult(
             pathName: normalizedPathName,
             path: relativePath,
-            absolutePath: fullPath,
             content: content
         )
     }
@@ -500,7 +509,10 @@ final class ScopedFilesService {
         let normalizedHeading = request.sectionHeading?.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedOperationId = request.operationId?.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedActor = request.actor?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let timestamp = isoFormatter.string(from: now())
+        // Instantiate the formatter locally per call — ISO8601DateFormatter
+        // is not documented as thread-safe, and `write(_:)` runs concurrently
+        // from the MCP server's dispatch queue.
+        let timestamp = ISO8601DateFormatter().string(from: now())
         let existingContent = try? String(contentsOfFile: fullPath, encoding: .utf8)
 
         let finalContent: String
@@ -592,13 +604,14 @@ final class ScopedFilesService {
         do {
             try appendAuditLog(auditEntry)
         } catch {
+            // Audit log is append-only and server-internal; don't echo
+            // absolute_path back to the client in error details.
             throw ScopedFilesError(
                 "Audit logging failed after write: \(error.localizedDescription)",
                 details: [
                     "path_name": normalizedPathName,
                     "written_path": relativePath,
                     "sha256": sha,
-                    "absolute_path": fullPath,
                     "timestamp": timestamp,
                 ]
             )
@@ -607,28 +620,36 @@ final class ScopedFilesService {
         return ScopedWriteResult(
             pathName: normalizedPathName,
             writtenPath: relativePath,
-            absolutePath: fullPath,
             sha256: sha,
             timestamp: timestamp
         )
     }
 
     private func appendAuditLog(_ entry: [String: Any]) throws {
+        // Serialize rotate + append through a single process-wide queue so
+        // concurrent writes from the MCP server's request-handler queue
+        // can't interleave mid-rotation or produce partial-line writes.
         let path = (auditLogPath as NSString).expandingTildeInPath
-        let dir = (path as NSString).deletingLastPathComponent
-        let fm = FileManager.default
-
-        try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        try rotateFileIfNeeded(at: path)
-
-        if !fm.fileExists(atPath: path) {
-            fm.createFile(atPath: path, contents: nil)
-        }
-
         let line = serializeJSONObject(entry) + "\n"
-        let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
-        defer { handle.closeFile() }
-        handle.seekToEndOfFile()
-        handle.write(line.data(using: .utf8) ?? Data())
+
+        var caught: Error?
+        auditLogQueue.sync {
+            let dir = (path as NSString).deletingLastPathComponent
+            let fm = FileManager.default
+            do {
+                try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+                try rotateFileIfNeeded(at: path)
+                if !fm.fileExists(atPath: path) {
+                    fm.createFile(atPath: path, contents: nil)
+                }
+                let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
+                defer { handle.closeFile() }
+                handle.seekToEndOfFile()
+                handle.write(line.data(using: .utf8) ?? Data())
+            } catch {
+                caught = error
+            }
+        }
+        if let caught = caught { throw caught }
     }
 }
