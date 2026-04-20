@@ -16,6 +16,7 @@ private enum LogComponent: String {
     case typing = "typing"
     case webhook = "webhook"
     case vault = "vault"
+    case files = "files"
     case server = "server"
 }
 
@@ -141,6 +142,37 @@ private let mcpTools: [[String: Any]] = [
                 "content_search": ["type": "boolean", "description": "Search inside file contents (default: filename only)"],
             ],
             "required": ["query"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "scoped_read",
+        "description": "Read a text file from a named, allowlisted path.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "path_name": ["type": "string", "description": "Configured allowlisted path name, like notes or ops"],
+                "path": ["type": "string", "description": "Relative path under the named allowed path"],
+            ],
+            "required": ["path_name", "path"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "scoped_write",
+        "description": "Write markdown/text content under a named, allowlisted path. Supports whole-file upserts and anchored section append/supersede operations with audit logging.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "path_name": ["type": "string", "description": "Configured allowlisted path name, like notes or ops"],
+                "path": ["type": "string", "description": "Relative path under the named allowed path"],
+                "content": ["type": "string", "description": "Content to write. For append-section/supersede, this is the section body."],
+                "mode": ["type": "string", "enum": ["upsert", "append-section", "supersede"]],
+                "section_anchor": ["type": "string", "description": "Stable anchor for append-section/supersede, e.g. deploy-target"],
+                "section_heading": ["type": "string", "description": "Optional human-readable heading for append-section/supersede. Defaults to a title-cased version of section_anchor."],
+                "operation_id": ["type": "string", "description": "Optional operation identifier for audit logging"],
+                "actor": ["type": "string", "description": "Optional actor identifier for audit logging"],
+                "metadata": ["type": "object", "description": "Optional JSON metadata to include in the audit log"],
+            ],
+            "required": ["path_name", "path", "content", "mode"],
         ] as [String: Any],
     ],
     [
@@ -277,6 +309,23 @@ private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
         return vaultList(input["path"] as? String ?? "")
     case "vault_search":
         return vaultSearch(input["query"] as? String ?? "", contentSearch: input["content_search"] as? Bool ?? false)
+    case "scoped_read":
+        return scopedRead(
+            pathName: input["path_name"] as? String ?? "",
+            path: input["path"] as? String ?? ""
+        )
+    case "scoped_write":
+        return scopedWrite(
+            pathName: input["path_name"] as? String ?? "",
+            path: input["path"] as? String ?? "",
+            content: input["content"] as? String ?? "",
+            mode: input["mode"] as? String ?? "",
+            sectionAnchor: input["section_anchor"] as? String,
+            sectionHeading: input["section_heading"] as? String,
+            operationId: input["operation_id"] as? String,
+            actor: input["actor"] as? String,
+            metadata: input["metadata"]
+        )
     case "check_messages":
         args = ["messages", "check"]
         if let phone = input["phone"] as? String, !phone.isEmpty { args += ["--phone", phone] }
@@ -363,7 +412,7 @@ private func downloadFile(_ urlString: String, filename: String?) -> String {
     // Extra safety: reject any remaining traversal
     let name = rawName.replacingOccurrences(of: "..", with: "_")
 
-    guard let destPath = safePath(root: downloadDir, relative: name) else {
+    guard let destPath = resolveScopedPath(root: downloadDir, relative: name) else {
         return "{\"error\": \"Invalid filename\"}"
     }
 
@@ -403,27 +452,13 @@ private func downloadFile(_ urlString: String, filename: String?) -> String {
     return resultJSON
 }
 
-// MARK: - Path Safety
-
-/// Resolve a relative path against a root and verify it doesn't escape.
-/// Returns nil if the path escapes the root (path traversal).
-private func safePath(root: String, relative: String) -> String? {
-    let full = (root as NSString).appendingPathComponent(relative)
-    let resolved = URL(fileURLWithPath: full).standardized.path
-    let resolvedRoot = URL(fileURLWithPath: root).standardized.path
-    guard resolved == resolvedRoot || resolved.hasPrefix(resolvedRoot + "/") else {
-        return nil
-    }
-    return resolved
-}
-
 // MARK: - Vault Helpers
 
 private let vaultRoot = (ProcessInfo.processInfo.environment["OBSIDIAN_VAULT_PATH"]
     ?? NSHomeDirectory() + "/Library/Mobile Documents/com~apple~CloudDocs/Obsidian")
 
 private func vaultRead(_ path: String) -> String {
-    guard let fullPath = safePath(root: vaultRoot, relative: path) else {
+    guard let fullPath = resolveScopedPath(root: vaultRoot, relative: path) else {
         log(.error, .vault, "Path traversal blocked", extra: ["path": path])
         return "{\"error\": \"Invalid path\"}"
     }
@@ -442,7 +477,7 @@ private func vaultRead(_ path: String) -> String {
 }
 
 private func vaultWrite(_ path: String, content: String) -> String {
-    guard let fullPath = safePath(root: vaultRoot, relative: path) else {
+    guard let fullPath = resolveScopedPath(root: vaultRoot, relative: path) else {
         log(.error, .vault, "Path traversal blocked", extra: ["path": path])
         return "{\"error\": \"Invalid path\"}"
     }
@@ -463,7 +498,7 @@ private func vaultList(_ path: String) -> String {
     if path.isEmpty {
         fullPath = vaultRoot
     } else {
-        guard let resolved = safePath(root: vaultRoot, relative: path) else {
+        guard let resolved = resolveScopedPath(root: vaultRoot, relative: path) else {
             log(.error, .vault, "Path traversal blocked", extra: ["path": path])
             return "{\"error\": \"Invalid path\"}"
         }
@@ -513,6 +548,84 @@ private func vaultSearch(_ query: String, contentSearch: Bool) -> String {
         return "{\"error\": \"Serialization failed\"}"
     }
     return json
+}
+
+// MARK: - Scoped File Helpers
+
+private let scopedFilesService = ScopedFilesService(
+    allowedPaths: loadAllowedPaths(from: ProcessInfo.processInfo.environment),
+    auditLogPath: ProcessInfo.processInfo.environment["ALLOWED_PATHS_AUDIT_LOG_PATH"]
+        ?? NSHomeDirectory() + "/.local/share/work-work/logs/allowed-paths-audit.log"
+)
+
+private func scopedRead(pathName: String, path: String) -> String {
+    do {
+        let result = try scopedFilesService.read(pathName: pathName, path: path)
+        return serializeJSONObject(result.jsonObject())
+    } catch let error as ScopedFilesError {
+        log(.error, .files, "Scoped read failed", extra: [
+            "path_name": pathName,
+            "path": path,
+            "error": error.message,
+        ])
+        return serializeJSONObject(error.jsonObject())
+    } catch {
+        log(.error, .files, "Scoped read failed", extra: [
+            "path_name": pathName,
+            "path": path,
+            "error": error.localizedDescription,
+        ])
+        return serializeJSONObject(["error": error.localizedDescription])
+    }
+}
+
+private func scopedWrite(
+    pathName: String,
+    path: String,
+    content: String,
+    mode: String,
+    sectionAnchor: String?,
+    sectionHeading: String?,
+    operationId: String?,
+    actor: String?,
+    metadata: Any?
+) -> String {
+    do {
+        let result = try scopedFilesService.write(ScopedWriteRequest(
+            pathName: pathName,
+            path: path,
+            content: content,
+            mode: mode,
+            sectionAnchor: sectionAnchor,
+            sectionHeading: sectionHeading,
+            operationId: operationId,
+            actor: actor,
+            metadata: metadata
+        ))
+        log(.info, .files, "Scoped write complete", extra: [
+            "path_name": result.pathName,
+            "path": result.writtenPath,
+            "mode": mode,
+            "sha256": result.sha256,
+        ])
+        return serializeJSONObject(result.jsonObject())
+    } catch let error as ScopedFilesError {
+        log(.error, .files, "Scoped write failed", extra: [
+            "path_name": pathName,
+            "path": path,
+            "mode": mode,
+            "error": error.message,
+        ])
+        return serializeJSONObject(error.jsonObject())
+    } catch {
+        log(.error, .files, "Scoped write failed", extra: [
+            "path_name": pathName,
+            "path": path,
+            "mode": mode,
+            "error": error.localizedDescription,
+        ])
+        return serializeJSONObject(["error": error.localizedDescription])
+    }
 }
 
 // MARK: - JSON-RPC Helpers

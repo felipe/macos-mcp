@@ -58,7 +58,12 @@ macos-mcp send message|file|chat [args...]         # AppleScript via osascript
 macos-mcp typing <contact> start|stop|keepalive    # Typing indicator
 ```
 
-Build: `make` — Restart service after build: `make install`
+Build: `make build` (compile-only) or `make` (signed) — Restart service after build: `make install`
+
+Testing:
+- `make test-logic` — SwiftPM logic tests for allowlisted path + markdown transforms
+- `make test-logic-docker` — same logic tests in a Docker Swift image
+- `make test-build` — macOS-only compile + MCP smoke test for `scoped_read` / `scoped_write`
 
 ## MCP Tools (exposed via `serve`)
 
@@ -91,13 +96,23 @@ Build: `make` — Restart service after build: `make install`
 
 Vault root: `OBSIDIAN_VAULT_PATH` env var or `~/Library/Mobile Documents/com~apple~CloudDocs/Obsidian`
 
+### Allowlisted Files
+- `scoped_read` — read a UTF-8 text file from an allowlisted path
+- `scoped_write` — write under an allowlisted path
+  - `upsert` — create/overwrite a whole file
+  - `append-section` — append a new anchored `##` section
+  - `supersede` — replace an anchored section and archive the old body under `## Superseded`
+
+Allowed paths: `ALLOWED_PATHS_JSON` env var mapping `path_name` → absolute path
+Audit log: `ALLOWED_PATHS_AUDIT_LOG_PATH` env var or `~/.local/share/work-work/logs/allowed-paths-audit.log`
+
 ## Connecting an AI Agent
 
 Any MCP-compatible agent can connect to the serve endpoint:
 
 1. Point the agent's MCP client at `http://<mac-ip>:9200/mcp`
 2. Set up a webhook route for inbound messages (the poller POSTs with HMAC-SHA256)
-3. The agent gets all MCP tools (send, read, calendar, vault) automatically
+3. The agent gets all MCP tools (send, read, calendar, vault, scoped files) automatically
 4. Optional: set `--mcp-secret` for bearer token auth on the MCP endpoint
 
 ## Logging
@@ -110,7 +125,7 @@ Any MCP-compatible agent can connect to the serve endpoint:
 {"ts":"...","level":"info","component":"poller","msg":"Heartbeat","watermark":4866,"pending":0}
 ```
 
-Components: `server`, `mcp`, `poller`, `typing`, `webhook`, `vault`
+Components: `server`, `mcp`, `poller`, `typing`, `webhook`, `vault`, `files`
 
 Filter errors: `tail -f <log> | jq 'select(.level == "error")'`
 
@@ -139,6 +154,8 @@ Managed via: `make install` (build + restart) or `make restart`
 
 - **Binary**: `./macos-mcp` (build with `make`)
 - **Sources**: `Sources/*.swift`
+- **Logic tests**: `Tests/ScopedFilesCoreTests/`
+- **Smoke test**: `scripts/smoke-scoped-files.sh`
 - **Messages DB**: `~/Library/Messages/chat.db`
 - **Service logs**: `~/.local/share/work-work/logs/launchd-macos-mcp-serve.err.log`
 - **Watermark**: `~/tmp/imessage/watermark`
