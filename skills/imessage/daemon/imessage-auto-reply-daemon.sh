@@ -25,7 +25,11 @@ trap 'exit 0' TERM INT HUP
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-MACOS_MCP="$PROJECT_ROOT/macos-mcp"
+# Default to the in-project build, but let the caller override with
+# $MACOS_MCP so the daemon can point at a canonical install path
+# (e.g. ~/.local/bin/macos-mcp produced by `make deploy`) without
+# keeping a second binary alongside the project-root copy.
+MACOS_MCP="${MACOS_MCP:-$PROJECT_ROOT/macos-mcp}"
 TMP_DIR="${IMESSAGE_TMP_DIR:-$HOME/tmp/imessage}"
 LOG_FILE="$TMP_DIR/imessage-auto-reply.log"
 
