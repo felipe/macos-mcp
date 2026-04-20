@@ -25,6 +25,24 @@ trap 'exit 0' TERM INT HUP
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+
+# Load environment variables from $PROJECT_ROOT/.env *before* the
+# config assignments below resolve. Sourcing after those assignments
+# (the earlier behavior) meant .env could never override them — every
+# ${VAR:-default}/${VAR:?required} had already captured the pre-.env
+# state.
+#
+# Precedence with this ordering: .env > launchd-exported env > built-in
+# defaults. A local dev's .env wins over a launchd plist's
+# EnvironmentVariables for variables set in both. On Minerva today
+# there is no project-root .env, so launchd values are what the script
+# sees. If a future operator needs launchd to win over .env, reverse
+# the layering by reading launchd env into a saved map before sourcing
+# and restoring after.
+if [ -f "$PROJECT_ROOT/.env" ]; then
+    source "$PROJECT_ROOT/.env"
+fi
+
 # Default to the in-project build, but let the caller override with
 # $MACOS_MCP so the daemon can point at a canonical install path
 # (e.g. ~/.local/bin/macos-mcp produced by `make deploy`) without
@@ -43,11 +61,6 @@ AGENT_TIMEOUT="${IMESSAGE_AGENT_TIMEOUT:-1800}"
 AGENT_SPEC_PATH="${MACOS_MCP_AGENT_PATH:-}"
 AGENT_RUNNER="$SCRIPT_DIR/agent-runner.py"
 AGENT_PYTHON="$SCRIPT_DIR/.venv/bin/python3"
-
-# Load environment variables if .env exists
-if [ -f "$PROJECT_ROOT/.env" ]; then
-    source "$PROJECT_ROOT/.env"
-fi
 
 # Verify binary exists
 if [ ! -x "$MACOS_MCP" ]; then
