@@ -339,6 +339,17 @@ private let mcpTools: [[String: Any]] = [
     ],
 ]
 
+// MARK: - Outbound Access
+
+private let outboundAccessConfig = AccessConfig.load()
+
+/// Non-nil = error JSON to return instead of dispatching the send.
+private func outboundDenied(_ recipient: String) -> String? {
+    if outboundAccessConfig.isAllowedRecipient(recipient) { return nil }
+    log(.error, .mcp, "Outbound send blocked by allowlist", extra: ["recipient": recipient])
+    return "{\"error\": \"Recipient not in the allowlist. Sends are limited to the owner and ~/.config/macos-mcp/access.json entries (allowFrom/groups).\"}"
+}
+
 // MARK: - Tool Dispatch
 
 /// Integer tool parameter; JSON numbers may arrive as Int or Double.
@@ -382,10 +393,13 @@ private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
 
     switch name {
     case "send_imessage":
+        if let denied = outboundDenied(input["contact"] as? String ?? "") { return denied }
         args = ["send", "message", input["contact"] as? String ?? "", input["text"] as? String ?? ""]
     case "send_to_chat":
+        if let denied = outboundDenied(input["chat_id"] as? String ?? "") { return denied }
         args = ["send", "chat", input["chat_id"] as? String ?? "", input["text"] as? String ?? ""]
     case "send_file":
+        if let denied = outboundDenied(input["contact"] as? String ?? "") { return denied }
         args = ["send", "file", input["contact"] as? String ?? "", input["file_path"] as? String ?? ""]
     case "download_file":
         return downloadFile(input["url"] as? String ?? "", filename: input["filename"] as? String)
