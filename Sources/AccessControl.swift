@@ -73,6 +73,19 @@ struct AccessConfig {
         return allowFrom.contains(AccessConfig.normalizePhone(handle))
     }
 
+    /// Outbound gate: an empty (unconfigured) config permits all recipients,
+    /// mirroring the inbound poller's permissive default. Once configured,
+    /// sends are limited to the same allowlist that gates inbound — group
+    /// identifiers match `allowedGroups`, everything else matches the
+    /// normalized handle against `allowFrom`.
+    func isAllowedRecipient(_ recipient: String) -> Bool {
+        if isEmpty { return true }
+        if AccessConfig.isGroupIdentifier(recipient) {
+            return allowedGroups.contains(recipient)
+        }
+        return allowFrom.contains(AccessConfig.normalizePhone(recipient))
+    }
+
     /// A group `chat_identifier` is the literal `chat` followed by digits
     /// (e.g. `chat646855985291785786`). Requiring the numeric suffix avoids
     /// misclassifying handles such as `chat@example.com` as groups.
