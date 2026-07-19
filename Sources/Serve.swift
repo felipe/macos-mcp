@@ -267,6 +267,59 @@ private let mcpTools: [[String: Any]] = [
         ] as [String: Any],
     ],
     [
+        "name": "permissions_status",
+        "description": "Report the status of each macOS permission domain the server depends on (Full Disk Access, Calendar, Automation for Notes/Reminders, vault). Never prompts and never hangs.",
+        "inputSchema": ["type": "object", "properties": [:] as [String: Any]] as [String: Any],
+    ],
+    [
+        "name": "notes_search",
+        "description": "Search Apple Notes by name or plaintext content. Returns id, name, folder, modified date, and a snippet per match. Requires Automation permission for Notes.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "query": ["type": "string", "description": "Text to match against note names and bodies"],
+                "limit": ["type": "integer", "default": 10, "description": "Max results (1-50)"],
+            ],
+            "required": ["query"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "notes_read",
+        "description": "Read a single Apple Note by id (from notes_search). Bodies over 40k characters are truncated. Requires Automation permission for Notes.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "note_id": ["type": "string", "description": "Note id, like x-coredata://..."],
+            ],
+            "required": ["note_id"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "reminders_list",
+        "description": "List Apple Reminders, optionally filtered by list name and due window. Slow for large lists — keep limits tight. Requires Automation permission for Reminders.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "list": ["type": "string", "description": "Filter by list name (substring) or list id"],
+                "include_completed": ["type": "boolean", "default": false],
+                "due_within_days": ["type": "integer", "description": "Only reminders due within N days"],
+                "limit": ["type": "integer", "default": 20, "description": "Max results (1-50)"],
+            ],
+        ] as [String: Any],
+    ],
+    [
+        "name": "contacts_search",
+        "description": "Search macOS Contacts by name, phone, or email. Returns matches with their phone and email handles. Reads the AddressBook database directly (covered by Full Disk Access).",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "query": ["type": "string", "description": "Name, phone fragment, or email fragment (min 2 chars)"],
+                "limit": ["type": "integer", "default": 10, "description": "Max results (1-50)"],
+            ],
+            "required": ["query"],
+        ] as [String: Any],
+    ],
+    [
         "name": "calendar_create",
         "description": "Create a calendar event",
         "inputSchema": [
@@ -291,6 +344,31 @@ private let mcpTools: [[String: Any]] = [
 private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
     let binary = ProcessInfo.processInfo.arguments[0]
     var args: [String] = []
+    var subprocessTimeout: TimeInterval = 0
+
+    switch name {
+    case "permissions_status":
+        return permissionsStatusJSON(vaultRoot: vaultRoot)
+    case "notes_search":
+        let limit = (input["limit"] as? Int) ?? (input["limit"] as? Double).map { Int($0) }
+        return notesSearch(query: input["query"] as? String ?? "", limit: limit)
+    case "notes_read":
+        return notesRead(noteId: input["note_id"] as? String ?? "")
+    case "reminders_list":
+        let limit = (input["limit"] as? Int) ?? (input["limit"] as? Double).map { Int($0) }
+        let dueWithinDays = (input["due_within_days"] as? Int) ?? (input["due_within_days"] as? Double).map { Int($0) }
+        return remindersList(
+            list: input["list"] as? String ?? "",
+            includeCompleted: input["include_completed"] as? Bool ?? false,
+            dueWithinDays: dueWithinDays,
+            limit: limit
+        )
+    case "contacts_search":
+        let limit = (input["limit"] as? Int) ?? (input["limit"] as? Double).map { Int($0) }
+        return contactsSearch(query: input["query"] as? String ?? "", limit: limit)
+    default:
+        break
+    }
 
     switch name {
     case "send_imessage":
@@ -345,19 +423,24 @@ private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
         args = ["typing", input["contact"] as? String ?? "", input["action"] as? String ?? ""]
     case "calendar_list":
         args = ["calendar", "list"]
+        subprocessTimeout = 30
     case "calendar_upcoming":
+        subprocessTimeout = 30
         let hours = (input["hours"] as? Int) ?? (input["hours"] as? Double).map { Int($0) } ?? 24
         args = ["calendar", "upcoming", "--hours", String(hours)]
         if let cal = input["calendar_id"] as? String, !cal.isEmpty { args += ["--cal", cal] }
     case "calendar_events":
+        subprocessTimeout = 30
         args = ["calendar", "events", "--from", input["from_date"] as? String ?? "", "--to", input["to_date"] as? String ?? ""]
         if let cal = input["calendar_id"] as? String, !cal.isEmpty { args += ["--cal", cal] }
     case "calendar_search":
+        subprocessTimeout = 30
         args = ["calendar", "search", input["query"] as? String ?? ""]
         let days = (input["days"] as? Int) ?? (input["days"] as? Double).map { Int($0) } ?? 30
         args += ["--days", String(days)]
         if let cal = input["calendar_id"] as? String, !cal.isEmpty { args += ["--cal", cal] }
     case "calendar_create":
+        subprocessTimeout = 30
         args = ["calendar", "create",
                 "--cal", input["calendar_id"] as? String ?? "",
                 "--title", input["title"] as? String ?? "",
@@ -370,7 +453,7 @@ private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
         return "{\"error\": \"Unknown tool: \(name)\"}"
     }
 
-    let result = runProcess(binary, arguments: args)
+    let result = runProcess(binary, arguments: args, timeout: subprocessTimeout)
     let output = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     if result.exitCode != 0 {
         let err = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)

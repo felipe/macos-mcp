@@ -6,6 +6,10 @@ SOURCES = $(wildcard Sources/*.swift)
 FRAMEWORKS = -framework EventKit
 LIBS = -lsqlite3
 SWIFTFLAGS = -O
+# Embed Info.plist so TCC prompts (Calendar, Apple Events) have the usage
+# descriptions macOS requires for a bare CLI binary.
+INFO_PLIST = Resources/Info.plist
+PLIST_EMBED = -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker $(INFO_PLIST)
 
 PLIST = $(HOME)/Library/LaunchAgents/com.macos-mcp.serve.plist
 
@@ -17,10 +21,10 @@ build: $(UNSIGNED)
 # Signed build used for deploys and local installation
 all: $(STAGING)
 
-$(UNSIGNED): $(SOURCES)
+$(UNSIGNED): $(SOURCES) $(INFO_PLIST)
 	@mkdir -p .build
-	swiftc $(SWIFTFLAGS) -target arm64-apple-macosx13.0 $(FRAMEWORKS) $(LIBS) $(SOURCES) -o .build/$(BINARY)-arm64
-	swiftc $(SWIFTFLAGS) -target x86_64-apple-macosx13.0 $(FRAMEWORKS) $(LIBS) $(SOURCES) -o .build/$(BINARY)-x86_64
+	swiftc $(SWIFTFLAGS) -target arm64-apple-macosx13.0 $(FRAMEWORKS) $(LIBS) $(PLIST_EMBED) $(SOURCES) -o .build/$(BINARY)-arm64
+	swiftc $(SWIFTFLAGS) -target x86_64-apple-macosx13.0 $(FRAMEWORKS) $(LIBS) $(PLIST_EMBED) $(SOURCES) -o .build/$(BINARY)-x86_64
 	lipo -create .build/$(BINARY)-arm64 .build/$(BINARY)-x86_64 -output $(UNSIGNED)
 	rm -f .build/$(BINARY)-arm64 .build/$(BINARY)-x86_64
 

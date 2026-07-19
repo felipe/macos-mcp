@@ -7,6 +7,33 @@ private let store = EKEventStore()
 
 // MARK: - Access
 
+/// Human-readable EventKit authorization status. Raw values are used because
+/// the legacy `.authorized` case and the macOS 14+ `.fullAccess` case share
+/// raw value 3, which a case-based switch cannot express without warnings.
+func calendarAuthorizationStatusName() -> String {
+    switch EKEventStore.authorizationStatus(for: .event).rawValue {
+    case 0: return "notDetermined"
+    case 1: return "restricted"
+    case 2: return "denied"
+    case 3:
+        if #available(macOS 14.0, *) { return "fullAccess" }
+        return "authorized"
+    case 4: return "writeOnly"
+    default: return "unknown"
+    }
+}
+
+/// True only for full read/write access (`.authorized` pre-macOS 14,
+/// `.fullAccess` on macOS 14+). Never triggers a prompt and never blocks.
+func calendarAccessGranted() -> Bool {
+    return EKEventStore.authorizationStatus(for: .event).rawValue == 3
+}
+
+/// Deliberately trigger the Calendar consent prompt. Only useful from a GUI
+/// session — headless contexts cannot display the prompt and this will block
+/// until it is answered. This is the explicit opt-in counterpart to the
+/// guard in `runCalendar`; without it the binary would never appear in
+/// System Settings > Privacy & Security > Calendars.
 private func requestCalendarAccess() async -> Bool {
     if #available(macOS 14.0, *) {
         return (try? await store.requestFullAccessToEvents()) ?? false
@@ -17,6 +44,19 @@ private func requestCalendarAccess() async -> Bool {
             }
         }
     }
+}
+
+private func runCalendarRequestAccess() {
+    let semaphore = DispatchSemaphore(value: 0)
+    Task {
+        let granted = await requestCalendarAccess()
+        printJSON([
+            "granted": NSNumber(value: granted),
+            "status": calendarAuthorizationStatusName(),
+        ])
+        semaphore.signal()
+    }
+    semaphore.wait()
 }
 
 // MARK: - Helpers
@@ -196,13 +236,23 @@ private func deleteEvent(eventId: String) {
 // MARK: - Entry Point
 
 func runCalendar(subcommand: String, args: [String]) {
+    // Explicit opt-in prompt path (GUI sessions only) — everything else is
+    // guarded below and never prompts.
+    if subcommand == "request-access" {
+        runCalendarRequestAccess()
+        return
+    }
+
+    // Authorization guard: check synchronously and fail loudly before touching
+    // the event store. Requesting access from a headless/launchd context can
+    // hang forever waiting for a consent prompt that will never be shown.
+    guard calendarAccessGranted() else {
+        exitWithError("Calendar access not granted (status: \(calendarAuthorizationStatusName())). Grant Calendar access to macos-mcp in System Settings > Privacy & Security > Calendars.")
+    }
+
     let semaphore = DispatchSemaphore(value: 0)
 
     Task {
-        guard await requestCalendarAccess() else {
-            exitWithError("Calendar access denied. Grant permission in System Settings > Privacy > Calendars.")
-        }
-
         switch subcommand {
         case "list", "list-calendars":
             listCalendars()
