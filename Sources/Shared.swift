@@ -48,6 +48,11 @@ func printJSON(_ object: Any) {
     print(json)
 }
 
+/// Canonical `{"error": message}` JSON string for tool results.
+func errorJSON(_ message: String) -> String {
+    return serializeJSONObject(["error": message])
+}
+
 func exitWithError(_ message: String) -> Never {
     let error: [String: Any] = ["error": message]
     if let data = try? JSONSerialization.data(withJSONObject: error),
@@ -57,6 +62,13 @@ func exitWithError(_ message: String) -> Never {
         fputs("{\"error\":\"\(message)\"}\n", stderr)
     }
     exit(1)
+}
+
+// MARK: - Limits
+
+func clampedLimit(_ value: Int?, fallback: Int, max maxValue: Int = 50) -> Int {
+    guard let value = value else { return fallback }
+    return Swift.max(1, Swift.min(value, maxValue))
 }
 
 // MARK: - Argument Parsing
@@ -72,11 +84,15 @@ func requireArgValue(_ args: [String], _ i: inout Int, flag: String) -> String {
 // MARK: - Process Helpers
 
 @discardableResult
-func runProcess(_ executablePath: String, arguments: [String], input: String? = nil, timeout: TimeInterval = 0) -> (stdout: String, stderr: String, exitCode: Int32) {
+func runProcess(_ executablePath: String, arguments: [String], input: String? = nil, timeout: TimeInterval = 0, extraEnv: [String: String]? = nil) -> (stdout: String, stderr: String, exitCode: Int32) {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: executablePath)
     process.arguments = arguments
-    process.environment = ProcessInfo.processInfo.environment
+    var environment = ProcessInfo.processInfo.environment
+    if let extraEnv = extraEnv {
+        for (key, value) in extraEnv { environment[key] = value }
+    }
+    process.environment = environment
 
     let stdoutPipe = Pipe()
     let stderrPipe = Pipe()
@@ -94,6 +110,22 @@ func runProcess(_ executablePath: String, arguments: [String], input: String? = 
         try process.run()
     } catch {
         return ("", error.localizedDescription, 1)
+    }
+
+    // Drain pipes concurrently so a child that writes more than the 64KB pipe
+    // buffer never deadlocks against waitUntilExit.
+    var stdoutData = Data()
+    var stderrData = Data()
+    let ioGroup = DispatchGroup()
+    ioGroup.enter()
+    DispatchQueue.global().async {
+        stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        ioGroup.leave()
+    }
+    ioGroup.enter()
+    DispatchQueue.global().async {
+        stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        ioGroup.leave()
     }
 
     if timeout > 0 {
@@ -115,8 +147,9 @@ func runProcess(_ executablePath: String, arguments: [String], input: String? = 
         process.waitUntilExit()
     }
 
-    let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-    let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    ioGroup.wait()
+    let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+    let stderr = String(data: stderrData, encoding: .utf8) ?? ""
     return (stdout, stderr, process.terminationStatus)
 }
 

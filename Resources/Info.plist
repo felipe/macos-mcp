@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.felipe.macos-mcp</string>
+	<key>CFBundleName</key>
+	<string>macos-mcp</string>
+	<key>CFBundleShortVersionString</key>
+	<string>3.0.0</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>macos-mcp reads and creates calendar events for its MCP calendar tools.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>macos-mcp reads and creates calendar events for its MCP calendar tools.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>macos-mcp reads Apple Notes and Reminders via AppleScript for its MCP tools.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>macos-mcp searches Contacts to resolve names to phone numbers and emails.</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>macos-mcp lists reminders for its MCP tools.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>macos-mcp lists reminders for its MCP tools.</string>
+</dict>
+</plist>

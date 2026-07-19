@@ -267,6 +267,59 @@ private let mcpTools: [[String: Any]] = [
         ] as [String: Any],
     ],
     [
+        "name": "permissions_status",
+        "description": "Report the status of each macOS permission domain the server depends on (Full Disk Access, Calendar, Automation for Notes/Reminders, vault). Never prompts and never hangs.",
+        "inputSchema": ["type": "object", "properties": [:] as [String: Any]] as [String: Any],
+    ],
+    [
+        "name": "notes_search",
+        "description": "Search Apple Notes by name or plaintext content. Returns id, name, folder, modified date, and a snippet per match. Requires Automation permission for Notes.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "query": ["type": "string", "description": "Text to match against note names and bodies"],
+                "limit": ["type": "integer", "default": 10, "description": "Max results (1-50)"],
+            ],
+            "required": ["query"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "notes_read",
+        "description": "Read a single Apple Note by id (from notes_search). Bodies over 40k characters are truncated. Requires Automation permission for Notes.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "note_id": ["type": "string", "description": "Note id, like x-coredata://..."],
+            ],
+            "required": ["note_id"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "reminders_list",
+        "description": "List Apple Reminders, optionally filtered by list name and due window. Slow for large lists — keep limits tight. Requires Automation permission for Reminders.",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "list": ["type": "string", "description": "Filter by list name (substring) or list id"],
+                "include_completed": ["type": "boolean", "default": false],
+                "due_within_days": ["type": "integer", "description": "Only reminders due within N days"],
+                "limit": ["type": "integer", "default": 20, "description": "Max results (1-50)"],
+            ],
+        ] as [String: Any],
+    ],
+    [
+        "name": "contacts_search",
+        "description": "Search macOS Contacts by name, phone, or email. Returns matches with their phone and email handles. Reads the AddressBook database directly (covered by Full Disk Access).",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "query": ["type": "string", "description": "Name, phone fragment, or email fragment (min 2 chars)"],
+                "limit": ["type": "integer", "default": 10, "description": "Max results (1-50)"],
+            ],
+            "required": ["query"],
+        ] as [String: Any],
+    ],
+    [
         "name": "calendar_create",
         "description": "Create a calendar event",
         "inputSchema": [
@@ -279,6 +332,7 @@ private let mcpTools: [[String: Any]] = [
                 "notes": ["type": "string"],
                 "location": ["type": "string"],
                 "all_day": ["type": "boolean", "default": false],
+                "availability": ["type": "string", "description": "free | busy | tentative | unavailable (defaults to the calendar's busy behavior)"],
             ],
             "required": ["calendar_id", "title", "start", "end"],
         ] as [String: Any],
@@ -287,10 +341,44 @@ private let mcpTools: [[String: Any]] = [
 
 // MARK: - Tool Dispatch
 
+/// Integer tool parameter; JSON numbers may arrive as Int or Double.
+private func intParam(_ input: [String: Any], _ key: String) -> Int? {
+    return (input[key] as? Int) ?? (input[key] as? Double).map { Int($0) }
+}
+
+/// Tools that run inside the server process (no subprocess). Returns nil for
+/// tools that dispatch via the CLI instead.
+private func runInProcessTool(_ name: String, _ input: [String: Any]) -> String? {
+    switch name {
+    case "permissions_status":
+        return permissionsStatusJSON(vaultRoot: vaultRoot)
+    case "notes_search":
+        return notesSearch(query: input["query"] as? String ?? "", limit: intParam(input, "limit"))
+    case "notes_read":
+        return notesRead(noteId: input["note_id"] as? String ?? "")
+    case "reminders_list":
+        return remindersList(
+            list: input["list"] as? String ?? "",
+            includeCompleted: input["include_completed"] as? Bool ?? false,
+            dueWithinDays: intParam(input, "due_within_days"),
+            limit: intParam(input, "limit")
+        )
+    case "contacts_search":
+        return contactsSearch(query: input["query"] as? String ?? "", limit: intParam(input, "limit"))
+    default:
+        return nil
+    }
+}
+
 /// Build CLI args for a tool call, execute self, return JSON string.
 private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
+    if let output = runInProcessTool(name, input) {
+        return output
+    }
+
     let binary = ProcessInfo.processInfo.arguments[0]
     var args: [String] = []
+    var subprocessTimeout: TimeInterval = 0
 
     switch name {
     case "send_imessage":
@@ -334,10 +422,9 @@ private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
     case "read_conversation":
         args = ["messages", "read"]
         if let phone = input["phone"] as? String, !phone.isEmpty { args += ["--phone", phone] }
-        let limit = (input["limit"] as? Int) ?? (input["limit"] as? Double).map { Int($0) } ?? 20
-        args += ["--limit", String(limit)]
+        args += ["--limit", String(intParam(input, "limit") ?? 20)]
     case "list_conversations":
-        let limit = (input["limit"] as? Int) ?? (input["limit"] as? Double).map { Int($0) } ?? 10
+        let limit = intParam(input, "limit") ?? 10
         args = ["messages", "list-conversations", "--limit", String(limit)]
     case "max_rowid":
         args = ["messages", "max-rowid"]
@@ -345,19 +432,22 @@ private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
         args = ["typing", input["contact"] as? String ?? "", input["action"] as? String ?? ""]
     case "calendar_list":
         args = ["calendar", "list"]
+        subprocessTimeout = 30
     case "calendar_upcoming":
-        let hours = (input["hours"] as? Int) ?? (input["hours"] as? Double).map { Int($0) } ?? 24
-        args = ["calendar", "upcoming", "--hours", String(hours)]
+        subprocessTimeout = 30
+        args = ["calendar", "upcoming", "--hours", String(intParam(input, "hours") ?? 24)]
         if let cal = input["calendar_id"] as? String, !cal.isEmpty { args += ["--cal", cal] }
     case "calendar_events":
+        subprocessTimeout = 30
         args = ["calendar", "events", "--from", input["from_date"] as? String ?? "", "--to", input["to_date"] as? String ?? ""]
         if let cal = input["calendar_id"] as? String, !cal.isEmpty { args += ["--cal", cal] }
     case "calendar_search":
+        subprocessTimeout = 30
         args = ["calendar", "search", input["query"] as? String ?? ""]
-        let days = (input["days"] as? Int) ?? (input["days"] as? Double).map { Int($0) } ?? 30
-        args += ["--days", String(days)]
+        args += ["--days", String(intParam(input, "days") ?? 30)]
         if let cal = input["calendar_id"] as? String, !cal.isEmpty { args += ["--cal", cal] }
     case "calendar_create":
+        subprocessTimeout = 30
         args = ["calendar", "create",
                 "--cal", input["calendar_id"] as? String ?? "",
                 "--title", input["title"] as? String ?? "",
@@ -366,11 +456,12 @@ private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
         if let notes = input["notes"] as? String, !notes.isEmpty { args += ["--notes", notes] }
         if let loc = input["location"] as? String, !loc.isEmpty { args += ["--location", loc] }
         if input["all_day"] as? Bool == true { args += ["--all-day"] }
+        if let avail = input["availability"] as? String, !avail.isEmpty { args += ["--availability", avail] }
     default:
         return "{\"error\": \"Unknown tool: \(name)\"}"
     }
 
-    let result = runProcess(binary, arguments: args)
+    let result = runProcess(binary, arguments: args, timeout: subprocessTimeout)
     let output = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     if result.exitCode != 0 {
         let err = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)

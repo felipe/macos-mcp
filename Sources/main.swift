@@ -18,7 +18,7 @@ case "icloud":
 
 case "calendar":
     guard args.count >= 2 else {
-        exitWithError("calendar requires a subcommand: list|events|upcoming|search|create|update|delete")
+        exitWithError("calendar requires a subcommand: list|events|upcoming|search|create|update|delete|request-access")
     }
     runCalendar(subcommand: args[1], args: Array(args.dropFirst(2)))
 
@@ -74,6 +74,7 @@ func printUsage() -> Never {
       create --cal ID --title TEXT --start DATE --end DATE [--notes TEXT] [--location TEXT] [--all-day]
       update --id ID [--title TEXT] [--start DATE] [--end DATE] [--notes TEXT] [--location TEXT]
       delete --id ID                          Delete an event
+      request-access                          Trigger the Calendar consent prompt (GUI session only)
 
     Messages subcommands:
       check [--phone PHONE] [--after-rowid N]  Poll new messages after ROWID (preferred)

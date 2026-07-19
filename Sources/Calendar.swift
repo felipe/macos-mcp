@@ -7,6 +7,33 @@ private let store = EKEventStore()
 
 // MARK: - Access
 
+/// Human-readable EventKit authorization status. Raw values are used because
+/// the legacy `.authorized` case and the macOS 14+ `.fullAccess` case share
+/// raw value 3, which a case-based switch cannot express without warnings.
+func calendarAuthorizationStatusName() -> String {
+    switch EKEventStore.authorizationStatus(for: .event).rawValue {
+    case 0: return "notDetermined"
+    case 1: return "restricted"
+    case 2: return "denied"
+    case 3:
+        if #available(macOS 14.0, *) { return "fullAccess" }
+        return "authorized"
+    case 4: return "writeOnly"
+    default: return "unknown"
+    }
+}
+
+/// True only for full read/write access (`.authorized` pre-macOS 14,
+/// `.fullAccess` on macOS 14+). Never triggers a prompt and never blocks.
+func calendarAccessGranted() -> Bool {
+    return EKEventStore.authorizationStatus(for: .event).rawValue == 3
+}
+
+/// Deliberately trigger the Calendar consent prompt. Only useful from a GUI
+/// session — headless contexts cannot display the prompt and this will block
+/// until it is answered. This is the explicit opt-in counterpart to the
+/// guard in `runCalendar`; without it the binary would never appear in
+/// System Settings > Privacy & Security > Calendars.
 private func requestCalendarAccess() async -> Bool {
     if #available(macOS 14.0, *) {
         return (try? await store.requestFullAccessToEvents()) ?? false
@@ -19,7 +46,33 @@ private func requestCalendarAccess() async -> Bool {
     }
 }
 
+private func runCalendarRequestAccess() {
+    let semaphore = DispatchSemaphore(value: 0)
+    Task {
+        let granted = await requestCalendarAccess()
+        printJSON([
+            "granted": NSNumber(value: granted),
+            "status": calendarAuthorizationStatusName(),
+        ])
+        semaphore.signal()
+    }
+    semaphore.wait()
+}
+
 // MARK: - Helpers
+
+/// Single source of truth for the availability wire values, used for both
+/// event output and `--availability` parsing.
+private let availabilityByName: [String: EKEventAvailability] = [
+    "free": .free,
+    "busy": .busy,
+    "tentative": .tentative,
+    "unavailable": .unavailable,
+]
+
+private func availabilityName(_ availability: EKEventAvailability) -> String {
+    return availabilityByName.first { $0.value == availability }?.key ?? "notSupported"
+}
 
 private func calendarToDict(_ cal: EKCalendar) -> [String: Any] {
     return [
@@ -49,6 +102,7 @@ private func eventToDict(_ event: EKEvent) -> [String: Any] {
     if let url = event.url { dict["url"] = url.absoluteString }
     if event.hasRecurrenceRules { dict["isRecurring"] = NSNumber(value: true) }
     if let organizer = event.organizer?.name { dict["organizer"] = organizer }
+    dict["availability"] = availabilityName(event.availability)
     dict["status"] = switch event.status {
         case .none: "none"
         case .confirmed: "confirmed"
@@ -117,7 +171,7 @@ private func searchEvents(query: String, daysBack: Int, calendarId: String?) {
 }
 
 private func createEvent(calendarId: String, title: String, startDate: Date, endDate: Date,
-                         notes: String?, location: String?, allDay: Bool) {
+                         notes: String?, location: String?, allDay: Bool, availability: String?) {
     guard let calendar = store.calendar(withIdentifier: calendarId) else {
         exitWithError("Calendar not found: \(calendarId)")
     }
@@ -140,6 +194,12 @@ private func createEvent(calendarId: String, title: String, startDate: Date, end
 
     if let notes = notes { event.notes = notes }
     if let location = location { event.location = location }
+    if let availability = availability {
+        guard let value = availabilityByName[availability.lowercased()] else {
+            exitWithError("Invalid availability: \(availability) (free|busy|tentative|unavailable)")
+        }
+        event.availability = value
+    }
 
     do {
         try store.save(event, span: .thisEvent)
@@ -196,13 +256,23 @@ private func deleteEvent(eventId: String) {
 // MARK: - Entry Point
 
 func runCalendar(subcommand: String, args: [String]) {
+    // Explicit opt-in prompt path (GUI sessions only) — everything else is
+    // guarded below and never prompts.
+    if subcommand == "request-access" {
+        runCalendarRequestAccess()
+        return
+    }
+
+    // Authorization guard: check synchronously and fail loudly before touching
+    // the event store. Requesting access from a headless/launchd context can
+    // hang forever waiting for a consent prompt that will never be shown.
+    guard calendarAccessGranted() else {
+        exitWithError("Calendar access not granted (status: \(calendarAuthorizationStatusName())). Grant Calendar access to macos-mcp in System Settings > Privacy & Security > Calendars.")
+    }
+
     let semaphore = DispatchSemaphore(value: 0)
 
     Task {
-        guard await requestCalendarAccess() else {
-            exitWithError("Calendar access denied. Grant permission in System Settings > Privacy > Calendars.")
-        }
-
         switch subcommand {
         case "list", "list-calendars":
             listCalendars()
@@ -268,6 +338,7 @@ func runCalendar(subcommand: String, args: [String]) {
             var notes: String?
             var location: String?
             var allDay = false
+            var availability: String?
             var i = 0
             while i < args.count {
                 switch args[i] {
@@ -277,6 +348,7 @@ func runCalendar(subcommand: String, args: [String]) {
                 case "--end": endStr = requireArgValue(args, &i, flag: "--end")
                 case "--notes": notes = requireArgValue(args, &i, flag: "--notes")
                 case "--location": location = requireArgValue(args, &i, flag: "--location")
+                case "--availability": availability = requireArgValue(args, &i, flag: "--availability")
                 case "--all-day": allDay = true
                 default: break
                 }
@@ -288,7 +360,7 @@ func runCalendar(subcommand: String, args: [String]) {
                 exitWithError("create requires --cal ID --title TEXT --start DATE --end DATE")
             }
             createEvent(calendarId: calId, title: title, startDate: startDate, endDate: endDate,
-                        notes: notes, location: location, allDay: allDay)
+                        notes: notes, location: location, allDay: allDay, availability: availability)
 
         case "update":
             var eventId: String?
