@@ -341,35 +341,44 @@ private let mcpTools: [[String: Any]] = [
 
 // MARK: - Tool Dispatch
 
-/// Build CLI args for a tool call, execute self, return JSON string.
-private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
-    let binary = ProcessInfo.processInfo.arguments[0]
-    var args: [String] = []
-    var subprocessTimeout: TimeInterval = 0
+/// Integer tool parameter; JSON numbers may arrive as Int or Double.
+private func intParam(_ input: [String: Any], _ key: String) -> Int? {
+    return (input[key] as? Int) ?? (input[key] as? Double).map { Int($0) }
+}
 
+/// Tools that run inside the server process (no subprocess). Returns nil for
+/// tools that dispatch via the CLI instead.
+private func runInProcessTool(_ name: String, _ input: [String: Any]) -> String? {
     switch name {
     case "permissions_status":
         return permissionsStatusJSON(vaultRoot: vaultRoot)
     case "notes_search":
-        let limit = (input["limit"] as? Int) ?? (input["limit"] as? Double).map { Int($0) }
-        return notesSearch(query: input["query"] as? String ?? "", limit: limit)
+        return notesSearch(query: input["query"] as? String ?? "", limit: intParam(input, "limit"))
     case "notes_read":
         return notesRead(noteId: input["note_id"] as? String ?? "")
     case "reminders_list":
-        let limit = (input["limit"] as? Int) ?? (input["limit"] as? Double).map { Int($0) }
-        let dueWithinDays = (input["due_within_days"] as? Int) ?? (input["due_within_days"] as? Double).map { Int($0) }
         return remindersList(
             list: input["list"] as? String ?? "",
             includeCompleted: input["include_completed"] as? Bool ?? false,
-            dueWithinDays: dueWithinDays,
-            limit: limit
+            dueWithinDays: intParam(input, "due_within_days"),
+            limit: intParam(input, "limit")
         )
     case "contacts_search":
-        let limit = (input["limit"] as? Int) ?? (input["limit"] as? Double).map { Int($0) }
-        return contactsSearch(query: input["query"] as? String ?? "", limit: limit)
+        return contactsSearch(query: input["query"] as? String ?? "", limit: intParam(input, "limit"))
     default:
-        break
+        return nil
     }
+}
+
+/// Build CLI args for a tool call, execute self, return JSON string.
+private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
+    if let output = runInProcessTool(name, input) {
+        return output
+    }
+
+    let binary = ProcessInfo.processInfo.arguments[0]
+    var args: [String] = []
+    var subprocessTimeout: TimeInterval = 0
 
     switch name {
     case "send_imessage":
@@ -413,10 +422,9 @@ private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
     case "read_conversation":
         args = ["messages", "read"]
         if let phone = input["phone"] as? String, !phone.isEmpty { args += ["--phone", phone] }
-        let limit = (input["limit"] as? Int) ?? (input["limit"] as? Double).map { Int($0) } ?? 20
-        args += ["--limit", String(limit)]
+        args += ["--limit", String(intParam(input, "limit") ?? 20)]
     case "list_conversations":
-        let limit = (input["limit"] as? Int) ?? (input["limit"] as? Double).map { Int($0) } ?? 10
+        let limit = intParam(input, "limit") ?? 10
         args = ["messages", "list-conversations", "--limit", String(limit)]
     case "max_rowid":
         args = ["messages", "max-rowid"]
@@ -427,8 +435,7 @@ private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
         subprocessTimeout = 30
     case "calendar_upcoming":
         subprocessTimeout = 30
-        let hours = (input["hours"] as? Int) ?? (input["hours"] as? Double).map { Int($0) } ?? 24
-        args = ["calendar", "upcoming", "--hours", String(hours)]
+        args = ["calendar", "upcoming", "--hours", String(intParam(input, "hours") ?? 24)]
         if let cal = input["calendar_id"] as? String, !cal.isEmpty { args += ["--cal", cal] }
     case "calendar_events":
         subprocessTimeout = 30
@@ -437,8 +444,7 @@ private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
     case "calendar_search":
         subprocessTimeout = 30
         args = ["calendar", "search", input["query"] as? String ?? ""]
-        let days = (input["days"] as? Int) ?? (input["days"] as? Double).map { Int($0) } ?? 30
-        args += ["--days", String(days)]
+        args += ["--days", String(intParam(input, "days") ?? 30)]
         if let cal = input["calendar_id"] as? String, !cal.isEmpty { args += ["--cal", cal] }
     case "calendar_create":
         subprocessTimeout = 30

@@ -48,6 +48,11 @@ func printJSON(_ object: Any) {
     print(json)
 }
 
+/// Canonical `{"error": message}` JSON string for tool results.
+func errorJSON(_ message: String) -> String {
+    return serializeJSONObject(["error": message])
+}
+
 func exitWithError(_ message: String) -> Never {
     let error: [String: Any] = ["error": message]
     if let data = try? JSONSerialization.data(withJSONObject: error),
@@ -57,6 +62,13 @@ func exitWithError(_ message: String) -> Never {
         fputs("{\"error\":\"\(message)\"}\n", stderr)
     }
     exit(1)
+}
+
+// MARK: - Limits
+
+func clampedLimit(_ value: Int?, fallback: Int, max maxValue: Int = 50) -> Int {
+    guard let value = value else { return fallback }
+    return Swift.max(1, Swift.min(value, maxValue))
 }
 
 // MARK: - Argument Parsing

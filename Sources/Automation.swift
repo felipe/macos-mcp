@@ -11,7 +11,7 @@ import Foundation
 // https://github.com/raroque/boop-agent
 
 private let osascriptBin = "/usr/bin/osascript"
-let automationScriptTimeout: TimeInterval = 20
+private let automationScriptTimeout: TimeInterval = 20
 
 // MARK: - AppleScript JSON helpers
 
@@ -71,7 +71,7 @@ end joinJson
 
 // MARK: - Error Mapping
 
-func automationDeniedMessage(_ appName: String) -> String {
+private func automationDeniedMessage(_ appName: String) -> String {
     return "Automation permission not granted for \(appName) — grant macos-mcp access to \(appName) in System Settings > Privacy & Security > Automation."
 }
 
@@ -85,19 +85,16 @@ private func isAutomationDenied(_ text: String) -> Bool {
         || lower.contains("operation not permitted")
 }
 
-func automationErrorJSON(_ message: String) -> String {
-    return serializeJSONObject(["error": message])
-}
-
 // MARK: - Runner
 
-/// Run an AppleScript against `appName`, returning its stdout (expected to be
-/// a JSON document) on success or a `{"error": ...}` JSON string on failure.
+/// Run an AppleScript against `appName`, returning its stdout parsed as JSON
+/// on success or a `{"error": ...}` JSON string on failure. Callers cast the
+/// parsed value to the shape their script emits.
 /// The osascript child is bounded by `automationScriptTimeout` and killed on
 /// expiry, so a hung Apple Event can never leak a subprocess.
-func runAutomationScript(appName: String, script: String, extraEnv: [String: String]) -> (output: String?, errorJSON: String?) {
+func runAutomationScript(appName: String, script: String, extraEnv: [String: String]) -> (json: Any?, error: String?) {
     guard FileManager.default.fileExists(atPath: osascriptBin) else {
-        return (nil, automationErrorJSON("osascript not found at \(osascriptBin)"))
+        return (nil, errorJSON("osascript not found at \(osascriptBin)"))
     }
 
     let result = runProcess(
@@ -111,29 +108,22 @@ func runAutomationScript(appName: String, script: String, extraEnv: [String: Str
 
     if result.exitCode != 0 {
         if isAutomationDenied(stderrText) {
-            return (nil, automationErrorJSON(automationDeniedMessage(appName)))
+            return (nil, errorJSON(automationDeniedMessage(appName)))
         }
         if stderrText.contains("timed out") {
-            return (nil, automationErrorJSON("\(appName) did not respond within \(Int(automationScriptTimeout))s. Try again with a smaller limit."))
+            return (nil, errorJSON("\(appName) did not respond within \(Int(automationScriptTimeout))s. Try again with a smaller limit."))
         }
         let detail = stderrText.isEmpty ? "exit code \(result.exitCode)" : stderrText
-        return (nil, automationErrorJSON("\(appName) AppleScript failed: \(detail)"))
+        return (nil, errorJSON("\(appName) AppleScript failed: \(detail)"))
     }
 
     let output = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !output.isEmpty else {
-        return (nil, automationErrorJSON("\(appName) returned an empty response"))
+        return (nil, errorJSON("\(appName) returned an empty response"))
     }
     guard let data = output.data(using: .utf8),
-          (try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])) != nil else {
-        return (nil, automationErrorJSON("\(appName) returned unreadable data"))
+          let json = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) else {
+        return (nil, errorJSON("\(appName) returned unreadable data"))
     }
-    return (output, nil)
-}
-
-// MARK: - Limits
-
-func clampedLimit(_ value: Int?, fallback: Int, max maxValue: Int = 50) -> Int {
-    guard let value = value else { return fallback }
-    return Swift.max(1, Swift.min(value, maxValue))
+    return (json, nil)
 }

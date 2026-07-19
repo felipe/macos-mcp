@@ -61,6 +61,19 @@ private func runCalendarRequestAccess() {
 
 // MARK: - Helpers
 
+/// Single source of truth for the availability wire values, used for both
+/// event output and `--availability` parsing.
+private let availabilityByName: [String: EKEventAvailability] = [
+    "free": .free,
+    "busy": .busy,
+    "tentative": .tentative,
+    "unavailable": .unavailable,
+]
+
+private func availabilityName(_ availability: EKEventAvailability) -> String {
+    return availabilityByName.first { $0.value == availability }?.key ?? "notSupported"
+}
+
 private func calendarToDict(_ cal: EKCalendar) -> [String: Any] {
     return [
         "id": cal.calendarIdentifier,
@@ -89,13 +102,7 @@ private func eventToDict(_ event: EKEvent) -> [String: Any] {
     if let url = event.url { dict["url"] = url.absoluteString }
     if event.hasRecurrenceRules { dict["isRecurring"] = NSNumber(value: true) }
     if let organizer = event.organizer?.name { dict["organizer"] = organizer }
-    dict["availability"] = switch event.availability {
-        case .free: "free"
-        case .tentative: "tentative"
-        case .unavailable: "unavailable"
-        case .busy: "busy"
-        default: "notSupported"
-    }
+    dict["availability"] = availabilityName(event.availability)
     dict["status"] = switch event.status {
         case .none: "none"
         case .confirmed: "confirmed"
@@ -188,13 +195,10 @@ private func createEvent(calendarId: String, title: String, startDate: Date, end
     if let notes = notes { event.notes = notes }
     if let location = location { event.location = location }
     if let availability = availability {
-        switch availability.lowercased() {
-        case "free": event.availability = .free
-        case "busy": event.availability = .busy
-        case "tentative": event.availability = .tentative
-        case "unavailable": event.availability = .unavailable
-        default: exitWithError("Invalid availability: \(availability) (free|busy|tentative|unavailable)")
+        guard let value = availabilityByName[availability.lowercased()] else {
+            exitWithError("Invalid availability: \(availability) (free|busy|tentative|unavailable)")
         }
+        event.availability = value
     }
 
     do {

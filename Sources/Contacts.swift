@@ -86,6 +86,12 @@ private func queryRows(_ db: OpaquePointer, sql: String, textBindings: [String] 
     return rows
 }
 
+/// Run a query whose single selected column is aliased `value` and collect
+/// the non-null string results.
+private func stringValues(_ db: OpaquePointer, sql: String) -> [String] {
+    return (queryRows(db, sql: sql) ?? []).compactMap { $0["value"] as? String }
+}
+
 private func escapeLike(_ input: String) -> String {
     return input
         .replacingOccurrences(of: "\\", with: "\\\\")
@@ -95,7 +101,7 @@ private func escapeLike(_ input: String) -> String {
 
 // MARK: - Search
 
-private func searchDatabase(_ db: OpaquePointer, query: String, pattern: String) -> [[String: Any]]? {
+private func searchDatabase(_ db: OpaquePointer, pattern: String) -> [[String: Any]]? {
     // 1. Records whose name fields match.
     let nameSQL = """
         SELECT Z_PK AS id, ZFIRSTNAME AS firstName, ZLASTNAME AS lastName,
@@ -144,17 +150,8 @@ private func searchDatabase(_ db: OpaquePointer, query: String, pattern: String)
     for candidate in candidates {
         guard let id = (candidate["id"] as? NSNumber)?.int64Value else { continue }
 
-        var phones: [String] = []
-        let phonesSQL = "SELECT ZFULLNUMBER AS value FROM ZABCDPHONENUMBER WHERE ZOWNER = \(id) AND COALESCE(ZFULLNUMBER, '') <> ''"
-        for row in queryRows(db, sql: phonesSQL) ?? [] {
-            if let value = row["value"] as? String { phones.append(value) }
-        }
-
-        var emails: [String] = []
-        let emailsSQL = "SELECT COALESCE(ZADDRESSNORMALIZED, ZADDRESS) AS value FROM ZABCDEMAILADDRESS WHERE ZOWNER = \(id) AND COALESCE(ZADDRESSNORMALIZED, ZADDRESS, '') <> ''"
-        for row in queryRows(db, sql: emailsSQL) ?? [] {
-            if let value = row["value"] as? String { emails.append(value) }
-        }
+        let phones = stringValues(db, sql: "SELECT ZFULLNUMBER AS value FROM ZABCDPHONENUMBER WHERE ZOWNER = \(id) AND COALESCE(ZFULLNUMBER, '') <> ''")
+        let emails = stringValues(db, sql: "SELECT COALESCE(ZADDRESSNORMALIZED, ZADDRESS) AS value FROM ZABCDEMAILADDRESS WHERE ZOWNER = \(id) AND COALESCE(ZADDRESSNORMALIZED, ZADDRESS, '') <> ''")
 
         let first = candidate["firstName"] as? String ?? ""
         let last = candidate["lastName"] as? String ?? ""
@@ -182,13 +179,13 @@ private func searchDatabase(_ db: OpaquePointer, query: String, pattern: String)
 func contactsSearch(query: String, limit: Int?) -> String {
     let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
     guard trimmed.count >= 2 else {
-        return serializeJSONObject(["error": "contacts_search requires a query of at least 2 characters"])
+        return errorJSON("contacts_search requires a query of at least 2 characters")
     }
     let maxResults = clampedLimit(limit, fallback: 10)
 
     let dbPaths = findAddressBookDBs()
     guard !dbPaths.isEmpty else {
-        return serializeJSONObject(["error": "No AddressBook database found under ~/Library/Application Support/AddressBook. If the directory exists, Full Disk Access may not be granted."])
+        return errorJSON("No AddressBook database found under ~/Library/Application Support/AddressBook. If the directory exists, Full Disk Access may not be granted.")
     }
 
     let pattern = "%\(escapeLike(trimmed))%"
@@ -201,7 +198,7 @@ func contactsSearch(query: String, limit: Int?) -> String {
         defer { sqlite3_close(db) }
         openedAny = true
 
-        for entry in searchDatabase(db, query: trimmed, pattern: pattern) ?? [] {
+        for entry in searchDatabase(db, pattern: pattern) ?? [] {
             // De-duplicate identical contacts that appear in multiple databases.
             let name = entry["name"] as? String ?? ""
             let phones = (entry["phones"] as? [String] ?? []).joined(separator: ",")
@@ -216,7 +213,7 @@ func contactsSearch(query: String, limit: Int?) -> String {
     }
 
     guard openedAny else {
-        return serializeJSONObject(["error": "Contacts database could not be opened. Full Disk Access may not be granted to macos-mcp."])
+        return errorJSON("Contacts database could not be opened. Full Disk Access may not be granted to macos-mcp.")
     }
     return serializeJSONObject(["query": trimmed, "results": results])
 }

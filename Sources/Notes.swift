@@ -13,17 +13,9 @@ private let noteBodyLimit = 40_000
 
 // MARK: - Scripts
 
-/// Case behavior matches AppleScript's default `contains` (case-insensitive).
-/// Snippets are capped at 240 characters.
-private let searchNotesScript = appleScriptJSONHelpers + #"""
-on noteSnippet(bodyText)
-  set cleanText to bodyText as text
-  if (length of cleanText) > 240 then
-    return (text 1 thru 240 of cleanText) & "..."
-  end if
-  return cleanText
-end noteSnippet
-
+/// Handlers shared by both Notes scripts: folder and modification date reads
+/// that tolerate notes disappearing mid-read.
+private let noteMetadataHandlers = #"""
 on noteFolderName(aNote)
   try
     tell application "Notes"
@@ -43,6 +35,19 @@ on noteModifiedAt(aNote)
     return ""
   end try
 end noteModifiedAt
+
+"""#
+
+/// Case behavior matches AppleScript's default `contains` (case-insensitive).
+/// Snippets are capped at 240 characters.
+private let searchNotesScript = appleScriptJSONHelpers + noteMetadataHandlers + #"""
+on noteSnippet(bodyText)
+  set cleanText to bodyText as text
+  if (length of cleanText) > 240 then
+    return (text 1 thru 240 of cleanText) & "..."
+  end if
+  return cleanText
+end noteSnippet
 
 set queryText to system attribute "MACOS_MCP_NOTES_QUERY"
 set maxItemsText to system attribute "MACOS_MCP_NOTES_LIMIT"
@@ -72,27 +77,7 @@ end tell
 return "[" & my joinJson(outputRows) & "]"
 """#
 
-private let readNoteScript = appleScriptJSONHelpers + #"""
-on noteFolderName(aNote)
-  try
-    tell application "Notes"
-      return name of container of aNote as text
-    end tell
-  on error
-    return "Notes"
-  end try
-end noteFolderName
-
-on noteModifiedAt(aNote)
-  try
-    tell application "Notes"
-      return modification date of aNote as text
-    end tell
-  on error
-    return ""
-  end try
-end noteModifiedAt
-
+private let readNoteScript = appleScriptJSONHelpers + noteMetadataHandlers + #"""
 set targetId to system attribute "MACOS_MCP_NOTES_ID"
 
 tell application "Notes"
@@ -118,10 +103,10 @@ return rowJson
 func notesSearch(query: String, limit: Int?) -> String {
     let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {
-        return automationErrorJSON("notes_search requires a non-empty query")
+        return errorJSON("notes_search requires a non-empty query")
     }
 
-    let (output, errorJSON) = runAutomationScript(
+    let (json, error) = runAutomationScript(
         appName: "Notes",
         script: searchNotesScript,
         extraEnv: [
@@ -129,11 +114,9 @@ func notesSearch(query: String, limit: Int?) -> String {
             "MACOS_MCP_NOTES_LIMIT": String(clampedLimit(limit, fallback: 10)),
         ]
     )
-    if let errorJSON = errorJSON { return errorJSON }
-    guard let output = output,
-          let data = output.data(using: .utf8),
-          let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
-        return automationErrorJSON("Notes returned unreadable data")
+    if let error = error { return error }
+    guard let rows = json as? [[String: Any]] else {
+        return errorJSON("Notes returned unreadable data")
     }
     return serializeJSONObject(["query": trimmed, "results": rows])
 }
@@ -141,19 +124,17 @@ func notesSearch(query: String, limit: Int?) -> String {
 func notesRead(noteId: String) -> String {
     let trimmed = noteId.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {
-        return automationErrorJSON("notes_read requires a note_id")
+        return errorJSON("notes_read requires a note_id")
     }
 
-    let (output, errorJSON) = runAutomationScript(
+    let (json, error) = runAutomationScript(
         appName: "Notes",
         script: readNoteScript,
         extraEnv: ["MACOS_MCP_NOTES_ID": trimmed]
     )
-    if let errorJSON = errorJSON { return errorJSON }
-    guard let output = output,
-          let data = output.data(using: .utf8),
-          var note = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-        return automationErrorJSON("Notes returned unreadable data")
+    if let error = error { return error }
+    guard var note = json as? [String: Any] else {
+        return errorJSON("Notes returned unreadable data")
     }
 
     if let body = note["body"] as? String, body.count > noteBodyLimit {

@@ -90,7 +90,7 @@ func remindersList(list: String, includeCompleted: Bool, dueWithinDays: Int?, li
         dueWithin = String(max(0, min(days, maxDueWithinDays)))
     }
 
-    let (output, errorJSON) = runAutomationScript(
+    let (json, error) = runAutomationScript(
         appName: "Reminders",
         script: listRemindersScript,
         extraEnv: [
@@ -100,11 +100,9 @@ func remindersList(list: String, includeCompleted: Bool, dueWithinDays: Int?, li
             "MACOS_MCP_REMINDERS_LIMIT": String(clampedLimit(limit, fallback: 20)),
         ]
     )
-    if let errorJSON = errorJSON { return errorJSON }
-    guard let output = output,
-          let data = output.data(using: .utf8),
-          let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
-        return automationErrorJSON("Reminders returned unreadable data")
+    if let error = error { return error }
+    guard let rows = json as? [[String: Any]] else {
+        return errorJSON("Reminders returned unreadable data")
     }
     return serializeJSONObject(["results": rows])
 }
