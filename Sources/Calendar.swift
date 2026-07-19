@@ -89,6 +89,13 @@ private func eventToDict(_ event: EKEvent) -> [String: Any] {
     if let url = event.url { dict["url"] = url.absoluteString }
     if event.hasRecurrenceRules { dict["isRecurring"] = NSNumber(value: true) }
     if let organizer = event.organizer?.name { dict["organizer"] = organizer }
+    dict["availability"] = switch event.availability {
+        case .free: "free"
+        case .tentative: "tentative"
+        case .unavailable: "unavailable"
+        case .busy: "busy"
+        default: "notSupported"
+    }
     dict["status"] = switch event.status {
         case .none: "none"
         case .confirmed: "confirmed"
@@ -157,7 +164,7 @@ private func searchEvents(query: String, daysBack: Int, calendarId: String?) {
 }
 
 private func createEvent(calendarId: String, title: String, startDate: Date, endDate: Date,
-                         notes: String?, location: String?, allDay: Bool) {
+                         notes: String?, location: String?, allDay: Bool, availability: String?) {
     guard let calendar = store.calendar(withIdentifier: calendarId) else {
         exitWithError("Calendar not found: \(calendarId)")
     }
@@ -180,6 +187,15 @@ private func createEvent(calendarId: String, title: String, startDate: Date, end
 
     if let notes = notes { event.notes = notes }
     if let location = location { event.location = location }
+    if let availability = availability {
+        switch availability.lowercased() {
+        case "free": event.availability = .free
+        case "busy": event.availability = .busy
+        case "tentative": event.availability = .tentative
+        case "unavailable": event.availability = .unavailable
+        default: exitWithError("Invalid availability: \(availability) (free|busy|tentative|unavailable)")
+        }
+    }
 
     do {
         try store.save(event, span: .thisEvent)
@@ -318,6 +334,7 @@ func runCalendar(subcommand: String, args: [String]) {
             var notes: String?
             var location: String?
             var allDay = false
+            var availability: String?
             var i = 0
             while i < args.count {
                 switch args[i] {
@@ -327,6 +344,7 @@ func runCalendar(subcommand: String, args: [String]) {
                 case "--end": endStr = requireArgValue(args, &i, flag: "--end")
                 case "--notes": notes = requireArgValue(args, &i, flag: "--notes")
                 case "--location": location = requireArgValue(args, &i, flag: "--location")
+                case "--availability": availability = requireArgValue(args, &i, flag: "--availability")
                 case "--all-day": allDay = true
                 default: break
                 }
@@ -338,7 +356,7 @@ func runCalendar(subcommand: String, args: [String]) {
                 exitWithError("create requires --cal ID --title TEXT --start DATE --end DATE")
             }
             createEvent(calendarId: calId, title: title, startDate: startDate, endDate: endDate,
-                        notes: notes, location: location, allDay: allDay)
+                        notes: notes, location: location, allDay: allDay, availability: availability)
 
         case "update":
             var eventId: String?

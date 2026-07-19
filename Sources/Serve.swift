@@ -332,6 +332,7 @@ private let mcpTools: [[String: Any]] = [
                 "notes": ["type": "string"],
                 "location": ["type": "string"],
                 "all_day": ["type": "boolean", "default": false],
+                "availability": ["type": "string", "description": "free | busy | tentative | unavailable (defaults to the calendar's busy behavior)"],
             ],
             "required": ["calendar_id", "title", "start", "end"],
         ] as [String: Any],
@@ -449,6 +450,7 @@ private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
         if let notes = input["notes"] as? String, !notes.isEmpty { args += ["--notes", notes] }
         if let loc = input["location"] as? String, !loc.isEmpty { args += ["--location", loc] }
         if input["all_day"] as? Bool == true { args += ["--all-day"] }
+        if let avail = input["availability"] as? String, !avail.isEmpty { args += ["--availability", avail] }
     default:
         return "{\"error\": \"Unknown tool: \(name)\"}"
     }
