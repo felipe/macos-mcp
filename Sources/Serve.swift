@@ -1121,6 +1121,19 @@ private func startPoller(
             "mode": "in-process",
         ])
 
+        // Sender/group allowlist. When unconfigured the gate is inactive and
+        // all inbound messages are forwarded (preserves prior behavior); set
+        // MACOS_MCP_OWNER_PHONE or ~/.config/macos-mcp/access.json to restrict.
+        let accessConfig = AccessConfig.load()
+        if accessConfig.isEmpty {
+            log(.warn, .poller, "Access control not configured — forwarding all inbound messages")
+        } else {
+            log(.info, .poller, "Access control active", extra: [
+                "allowed_phones": accessConfig.allowFrom.count,
+                "allowed_groups": accessConfig.allowedGroups.count,
+            ])
+        }
+
         // WAL watcher: signals semaphore on DB changes for instant pickup
         let walSemaphore = DispatchSemaphore(value: 0)
         let walSource = startWALWatcher(semaphore: walSemaphore, queue: pollerQueue)
@@ -1170,6 +1183,13 @@ private func startPoller(
 
                 let thread = msg.chat.isEmpty ? msg.from : msg.chat
                 if thread.isEmpty { continue }
+
+                // Drop senders/groups not on the allowlist. The watermark has
+                // already advanced above, so blocked messages are not re-seen.
+                if !accessConfig.isEmpty && !accessConfig.isAllowed(from: msg.from, chat: msg.chat) {
+                    log(.info, .poller, "Blocked by access control", extra: ["rowid": rowid, "from": msg.from, "chat": msg.chat])
+                    continue
+                }
 
                 log(.info, .poller, "New message", extra: ["rowid": rowid, "thread": thread, "preview": String(msg.text.prefix(80))])
                 pending.append((text: msg.text, thread: thread, rowid: rowid))

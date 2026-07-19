@@ -8,6 +8,7 @@ let package = Package(
     ],
     products: [
         .library(name: "ScopedFilesCore", targets: ["ScopedFilesCore"]),
+        .library(name: "AccessControl", targets: ["AccessControl"]),
     ],
     targets: [
         .target(
@@ -19,6 +20,16 @@ let package = Package(
             name: "ScopedFilesCoreTests",
             dependencies: ["ScopedFilesCore"],
             path: "Tests/ScopedFilesCoreTests"
+        ),
+        .target(
+            name: "AccessControl",
+            path: "Sources",
+            sources: ["AccessControl.swift"]
+        ),
+        .testTarget(
+            name: "AccessControlTests",
+            dependencies: ["AccessControl"],
+            path: "Tests/AccessControlTests"
         ),
     ]
 )
