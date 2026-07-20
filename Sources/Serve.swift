@@ -337,6 +337,31 @@ private let mcpTools: [[String: Any]] = [
             "required": ["calendar_id", "title", "start", "end"],
         ] as [String: Any],
     ],
+    [
+        "name": "calendar_update",
+        "description": "Update an existing calendar event",
+        "inputSchema": [
+            "type": "object",
+            "properties": [
+                "event_id": ["type": "string"],
+                "title": ["type": "string"],
+                "start": ["type": "string"],
+                "end": ["type": "string"],
+                "notes": ["type": "string"],
+                "location": ["type": "string"],
+            ],
+            "required": ["event_id"],
+        ] as [String: Any],
+    ],
+    [
+        "name": "calendar_delete",
+        "description": "Delete an existing calendar event",
+        "inputSchema": [
+            "type": "object",
+            "properties": ["event_id": ["type": "string"]],
+            "required": ["event_id"],
+        ] as [String: Any],
+    ],
 ]
 
 // MARK: - Outbound Access
@@ -480,6 +505,17 @@ private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
         if let loc = input["location"] as? String, !loc.isEmpty { args += ["--location", loc] }
         if input["all_day"] as? Bool == true { args += ["--all-day"] }
         if let avail = input["availability"] as? String, !avail.isEmpty { args += ["--availability", avail] }
+    case "calendar_update":
+        subprocessTimeout = 30
+        args = ["calendar", "update", "--id", input["event_id"] as? String ?? ""]
+        if let title = input["title"] as? String { args += ["--title", title] }
+        if let start = input["start"] as? String { args += ["--start", start] }
+        if let end = input["end"] as? String { args += ["--end", end] }
+        if let notes = input["notes"] as? String { args += ["--notes", notes] }
+        if let location = input["location"] as? String { args += ["--location", location] }
+    case "calendar_delete":
+        subprocessTimeout = 30
+        args = ["calendar", "delete", "--id", input["event_id"] as? String ?? ""]
     default:
         return "{\"error\": \"Unknown tool: \(name)\"}"
     }
