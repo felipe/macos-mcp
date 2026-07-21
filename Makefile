@@ -12,6 +12,8 @@ INFO_PLIST = Resources/Info.plist
 PLIST_EMBED = -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker $(INFO_PLIST)
 
 PLIST = $(HOME)/Library/LaunchAgents/com.macos-mcp.serve.plist
+LABEL = com.macos-mcp.serve
+GUI_DOMAIN = gui/$(shell id -u)
 
 .PHONY: all build clean restart install deploy test-logic test-logic-docker test-build
 
@@ -47,21 +49,21 @@ test-build: build
 
 # Deploy: stop service, copy signed binary, restart
 deploy: $(STAGING)
-	-launchctl unload $(PLIST) 2>/dev/null
 	cp $(STAGING) $(INSTALLED)
-	sleep 1
-	launchctl load $(PLIST)
-	@echo "Deployed to $(INSTALLED) and service restarted"
-	@echo "NOTE: Grant FDA to $(INSTALLED) on first deploy"
+	$(MAKE) restart
+	@echo "Deployed to $(INSTALLED)"
+	@echo "NOTE: on FIRST deploy, grant FDA + Calendar to $(INSTALLED) in a GUI session"
 
 # Alias for deploy
 install: deploy
 
 restart:
-	-launchctl unload $(PLIST) 2>/dev/null
-	sleep 1
-	launchctl load $(PLIST)
-	@echo "Service restarted"
+	# Restart in the GUI domain so the agent re-execs the new binary and
+	# re-reads TCC (Calendar/FDA). kickstart -k restarts in place when loaded;
+	# bootstrap covers the not-yet-loaded first-install case. Targeting
+	# gui/<uid> explicitly makes this correct even when run over ssh.
+	launchctl kickstart -k $(GUI_DOMAIN)/$(LABEL) 2>/dev/null || launchctl bootstrap $(GUI_DOMAIN) $(PLIST)
+	@echo "Agent restarted in $(GUI_DOMAIN)"
 
 clean:
 	rm -rf .build $(BINARY)
