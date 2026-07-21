@@ -17,6 +17,10 @@ GUI_DOMAIN = gui/$(shell id -u)
 
 .PHONY: all build clean restart install deploy test-logic test-logic-docker test-build
 
+# If codesign (or any recipe) fails, delete the half-built target so a
+# stale UNSIGNED artifact can never be trusted as "built" on the next run.
+.DELETE_ON_ERROR:
+
 # Compile-only build for local/macOS smoke tests and CI checks
 build: $(UNSIGNED)
 
