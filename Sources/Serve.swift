@@ -5,10 +5,41 @@ import Network
 // MARK: - Structured Logging
 
 private enum LogLevel: String {
+    case debug = "debug"
     case info = "info"
     case warn = "warn"
     case error = "error"
+
+    /// Higher is more severe. Compared against `minLogLevel` to decide whether
+    /// an entry is written at all.
+    var severity: Int {
+        switch self {
+        case .debug: return 0
+        case .info: return 1
+        case .warn: return 2
+        case .error: return 3
+        }
+    }
 }
+
+/// Minimum level actually written to stderr. Defaults to `info`, so `debug`
+/// entries are dropped unless `MACOS_MCP_LOG_LEVEL=debug` is set.
+///
+/// This exists because per-tool-call logging is not viable at the poller's
+/// cadence. The Hermes gateway calls `check_messages` every 2s, so one info
+/// line per tool call produced roughly 43k lines and 23 MB per day -- 99% of
+/// all log volume. `launchd-macos-mcp-serve.err.log` reached 211 MB before it
+/// was first truncated on 2026-08-10. Tool-call tracing is still available on
+/// demand by restarting the agent with MACOS_MCP_LOG_LEVEL=debug.
+private let minLogLevel: LogLevel = {
+    switch ProcessInfo.processInfo.environment["MACOS_MCP_LOG_LEVEL"]?.lowercased() {
+    case "debug": return .debug
+    case "info": return .info
+    case "warn": return .warn
+    case "error": return .error
+    default: return .info
+    }
+}()
 
 private enum LogComponent: String {
     case mcp = "mcp"
@@ -21,6 +52,7 @@ private enum LogComponent: String {
 }
 
 private func log(_ level: LogLevel, _ component: LogComponent, _ message: String, extra: [String: Any]? = nil) {
+    guard level.severity >= minLogLevel.severity else { return }
     let ts = ISO8601DateFormatter().string(from: Date())
     var entry: [String: Any] = [
         "ts": ts,
@@ -957,7 +989,7 @@ private func handleMCPRequest(_ request: HTTPRequest) -> Data {
         let toolName = params["name"] as? String ?? ""
         let toolArgs = params["arguments"] as? [String: Any] ?? [:]
 
-        log(.info, .mcp, "Tool call", extra: ["tool": toolName])
+        log(.debug, .mcp, "Tool call", extra: ["tool": toolName])
         let output = dispatchTool(toolName, toolArgs)
 
         let result = jsonRpcResult(id, [
