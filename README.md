@@ -105,6 +105,12 @@ tail -f ~/.local/share/work-work/logs/launchd-macos-mcp-serve.err.log | jq 'sele
 tail -f ~/.local/share/work-work/logs/launchd-macos-mcp-serve.err.log | jq 'select(.msg == "Heartbeat")'
 ```
 
+## Apple Mail
+
+Search and read cached mail through SQLite and MIME parsing; compose, draft, reply, forward, move, and update flags through Mail.app. Nine MCP tools share the `macos-mcp mail` CLI contract. See [Apple Mail usage, permissions, and limitations](docs/apple-mail.md).
+
+Run `make test-mail` for the synthetic CLI/MCP smoke test.
+
 ## Requirements
 
 - macOS 13+ (Ventura)

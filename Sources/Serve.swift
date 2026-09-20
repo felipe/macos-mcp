@@ -362,7 +362,7 @@ private let mcpTools: [[String: Any]] = [
             "required": ["event_id"],
         ] as [String: Any],
     ],
-]
+] + mailToolDefinitions
 
 // MARK: - Outbound Access
 
@@ -424,6 +424,11 @@ private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
     var subprocessTimeout: TimeInterval = 0
 
     switch name {
+    case let name where name.hasPrefix("mail_"):
+        do { args = try mailCLIArguments(tool: name, input: input) }
+        catch {
+            return errorJSON(error.localizedDescription)
+        }
     case "send_imessage":
         let smContact = resolveOwnerAlias(input["contact"] as? String ?? "")
         if let denied = outboundDenied(smContact) { return denied }
@@ -960,9 +965,11 @@ private func handleMCPRequest(_ request: HTTPRequest) -> Data {
         log(.info, .mcp, "Tool call", extra: ["tool": toolName])
         let output = dispatchTool(toolName, toolArgs)
 
-        let result = jsonRpcResult(id, [
-            "content": [["type": "text", "text": output]],
-        ])
+        var toolResult: [String: Any] = ["content": [["type": "text", "text": output]]]
+        if toolName.hasPrefix("mail_"),
+           let parsed = try? JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any],
+           parsed["error"] != nil { toolResult["isError"] = true }
+        let result = jsonRpcResult(id, toolResult)
         return sseResponse(sessionId: sessionId, events: [sseEvent(result)])
 
     case "ping":

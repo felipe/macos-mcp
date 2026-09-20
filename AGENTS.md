@@ -77,6 +77,14 @@ Testing:
 - `max_rowid` — current watermark for polling
 - `typing_indicator` — start/stop/keepalive
 
+### Apple Mail
+- `mail_search`, `mail_read`, `mail_list_mailboxes` use the local read-only index and cache.
+- `mail_send`, `mail_draft`, `mail_reply`, `mail_forward`, `mail_move`, `mail_flag` use Mail.app.
+- Reply and forward send immediately. Never send test emails without explicit authorization.
+- Never equate SQLite row IDs or document IDs with AppleScript IDs. Resolve RFC Message-ID and reject ambiguity.
+- `make test-mail` exercises synthetic CLI/MCP fixtures without live Mail actions.
+- See [Mail contract and limitations](docs/apple-mail.md).
+
 ### Calendar
 - `calendar_list` — list calendars
 - `calendar_upcoming` — next N hours
