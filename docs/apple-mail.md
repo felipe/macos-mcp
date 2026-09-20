@@ -57,3 +57,5 @@ make test-mail      # Synthetic Mail CLI/MCP smoke test; never sends email
 ```
 
 Automated action tests use an injected runner and compile generated scripts against the installed Mail dictionary. They do not prove provider delivery or live Mail mutations. Live sending requires an explicitly authorized test recipient; installation and service restart are separate from these checks.
+
+See [verification evidence and remaining live checks](apple-mail-verification.md).

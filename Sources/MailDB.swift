@@ -398,22 +398,25 @@ final class MailDBConnection {
             index += 1
         }
         guard let headerEnd else { return nil }
-        let text = String(String.UnicodeScalarView(bytes[headerStart..<headerEnd].map { UnicodeScalar(UInt32($0))! }))
-        let lines = text.components(separatedBy: "\n")
         var value: String?
         var collecting = false
-        for line in lines {
-            let string = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+        var lineStart = headerStart
+        while lineStart < headerEnd {
+            var lineEnd = lineStart
+            while lineEnd < headerEnd, bytes[lineEnd] != 10, bytes[lineEnd] != 13 { lineEnd += 1 }
+            let string = String(String.UnicodeScalarView(bytes[lineStart..<lineEnd].map { UnicodeScalar(UInt32($0))! }))
             if string.isEmpty { break }
             if collecting, string.hasPrefix(" ") || string.hasPrefix("\t") {
                 value = (value ?? "") + string.trimmingCharacters(in: .whitespaces)
-                continue
+            } else {
+                collecting = false
+                if string.lowercased().hasPrefix("message-id:") {
+                    value = String(string.dropFirst("message-id:".count)).trimmingCharacters(in: .whitespaces)
+                    collecting = true
+                }
             }
-            collecting = false
-            if string.lowercased().hasPrefix("message-id:") {
-                value = String(string.dropFirst("message-id:".count)).trimmingCharacters(in: .whitespaces)
-                collecting = true
-            }
+            while lineEnd < headerEnd, bytes[lineEnd] == 10 || bytes[lineEnd] == 13 { lineEnd += 1 }
+            lineStart = lineEnd
         }
         return value
     }
