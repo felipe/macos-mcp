@@ -42,6 +42,10 @@ trap cleanup EXIT
 mkdir -p "$TEST_ROOT"
 export ALLOWED_PATHS_JSON="{\"test\":\"$TEST_ROOT\"}"
 export ALLOWED_PATHS_AUDIT_LOG_PATH="$AUDIT_LOG"
+export MACOS_MCP_PERMISSIONS_FILE="$TMP_DIR/permissions.json"
+cat > "$MACOS_MCP_PERMISSIONS_FILE" <<'JSON'
+{"version":1,"tools":{"scoped_read":{"allow":true},"scoped_write":{"allow":true}}}
+JSON
 
 if [[ ! -x "$BINARY" ]]; then
   echo "Binary not found or not executable: $BINARY" >&2

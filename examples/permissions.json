@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "tools": {
+    "send_imessage": {
+      "allow": false
+    },
+    "send_to_chat": {
+      "allow": false
+    },
+    "send_file": {
+      "allow": false
+    },
+    "download_file": {
+      "allow": false
+    },
+    "vault_read": {
+      "allow": true
+    },
+    "vault_write": {
+      "allow": false,
+      "paths": [
+        "Projects"
+      ]
+    },
+    "vault_list": {
+      "allow": true
+    },
+    "vault_search": {
+      "allow": true
+    },
+    "scoped_read": {
+      "allow": true
+    },
+    "scoped_write": {
+      "allow": false,
+      "path_names": [
+        "notes"
+      ],
+      "modes": [
+        "append-section"
+      ],
+      "paths": [
+        "Projects"
+      ]
+    },
+    "check_messages": {
+      "allow": true
+    },
+    "read_conversation": {
+      "allow": true
+    },
+    "list_conversations": {
+      "allow": true
+    },
+    "max_rowid": {
+      "allow": true
+    },
+    "typing_indicator": {
+      "allow": false
+    },
+    "calendar_list": {
+      "allow": true
+    },
+    "calendar_upcoming": {
+      "allow": true
+    },
+    "calendar_events": {
+      "allow": true
+    },
+    "calendar_search": {
+      "allow": true
+    },
+    "permissions_status": {
+      "allow": true
+    },
+    "notes_search": {
+      "allow": true
+    },
+    "notes_read": {
+      "allow": true
+    },
+    "reminders_list": {
+      "allow": true
+    },
+    "contacts_search": {
+      "allow": true
+    },
+    "calendar_create": {
+      "allow": false
+    },
+    "calendar_update": {
+      "allow": false
+    },
+    "calendar_delete": {
+      "allow": false
+    },
+    "mail_search": {
+      "allow": true
+    },
+    "mail_read": {
+      "allow": true
+    },
+    "mail_list_mailboxes": {
+      "allow": true
+    },
+    "mail_send": {
+      "allow": false
+    },
+    "mail_draft": {
+      "allow": false
+    },
+    "mail_reply": {
+      "allow": false
+    },
+    "mail_forward": {
+      "allow": false
+    },
+    "mail_move": {
+      "allow": false
+    },
+    "mail_flag": {
+      "allow": false
+    }
+  }
+}

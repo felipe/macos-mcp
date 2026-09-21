@@ -170,6 +170,15 @@ Managed via: `make install` (build + restart) or `make restart`
 - **Downloads**: `~/tmp/imessage/downloads/`
 - **Launchd plist**: `~/Library/LaunchAgents/com.macos-mcp.serve.plist`
 
+## MCP permissions
+
+- `~/.config/macos-mcp/permissions.json`, overridden by `MACOS_MCP_PERMISSIONS_FILE`, gates every MCP call before dispatch.
+- Mutations default to denied. A configured policy grants only tools with `allow: true`; invalid configuration denies all tools.
+- Preserve the centralized gate when adding tools. New tools must remain disabled until granted; classify read-only defaults deliberately.
+- File writes must respect path/mode constraints and cannot modify the policy, including through audit logs or downloads.
+- Policy changes apply to new calls without restart. CLI and inbound polling are separate boundaries.
+- Run `make test-permissions` for the end-to-end policy gate. See [policy documentation](docs/tool-permissions.md).
+
 ## Guardrails
 
 - Never send messages without explicit user confirmation (serve mode is the exception — it's opt-in via webhook)

@@ -10,6 +10,13 @@ cleanup() {
 }
 trap cleanup EXIT
 export MAIL_DATA_DIR="$TMP_DIR/V10"
+export MACOS_MCP_PERMISSIONS_FILE="$TMP_DIR/permissions.json"
+# Enable schemas for validation checks; no valid action calls are made.
+python3 - <<'POLICY'
+import json,os
+names = ['mail_search','mail_read','mail_list_mailboxes','mail_send','mail_draft','mail_reply','mail_forward','mail_move','mail_flag']
+with open(os.environ['MACOS_MCP_PERMISSIONS_FILE'],'w') as f: json.dump({'version':1,'tools':{name:{'allow':True} for name in names}},f)
+POLICY
 python3 - <<'PY'
 import os,sqlite3,pathlib
 root=pathlib.Path(os.environ['MAIL_DATA_DIR']); (root/'MailData').mkdir(parents=True)

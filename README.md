@@ -105,6 +105,10 @@ tail -f ~/.local/share/work-work/logs/launchd-macos-mcp-serve.err.log | jq 'sele
 tail -f ~/.local/share/work-work/logs/launchd-macos-mcp-serve.err.log | jq 'select(.msg == "Heartbeat")'
 ```
 
+## MCP permissions
+
+Mutating MCP tools are disabled until explicitly granted in `~/.config/macos-mcp/permissions.json`. The server checks the policy before every call and supports path and operation restrictions for file tools. See [configuration and migration](docs/tool-permissions.md) and the [complete example](examples/permissions.json).
+
 ## Apple Mail
 
 Search and read cached mail through SQLite and MIME parsing; compose, draft, reply, forward, move, and update flags through Mail.app. Nine MCP tools share the `macos-mcp mail` CLI contract. See [Apple Mail usage, permissions, and limitations](docs/apple-mail.md).

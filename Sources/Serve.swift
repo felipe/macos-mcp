@@ -364,6 +364,10 @@ private let mcpTools: [[String: Any]] = [
     ],
 ] + mailToolDefinitions
 
+private func currentToolPermissions() -> ToolPermissions {
+    ToolPermissions.load(knownTools: Set(mcpTools.compactMap { $0["name"] as? String }))
+}
+
 // MARK: - Outbound Access
 
 private let outboundAccessConfig = AccessConfig.load()
@@ -415,6 +419,12 @@ private func runInProcessTool(_ name: String, _ input: [String: Any]) -> String?
 
 /// Build CLI args for a tool call, execute self, return JSON string.
 private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
+    let policy = currentToolPermissions()
+    if let denied = policy.denial(tool: name, input: input,
+                                   allowedPaths: loadAllowedPaths(from: ProcessInfo.processInfo.environment), vaultRoot: vaultRoot, auditLogPath: scopedAuditLogPath) {
+        log(.warn, .mcp, "Tool denied by permissions policy", extra: ["tool": name])
+        return errorJSON(denied)
+    }
     if let output = runInProcessTool(name, input) {
         return output
     }
@@ -571,6 +581,8 @@ private func downloadFile(_ urlString: String, filename: String?) -> String {
         return "{\"error\": \"Invalid filename\"}"
     }
 
+    guard rawName != ".", rawName != "..", !rawName.isEmpty else { return errorJSON("Invalid download filename") }
+    if currentToolPermissions().protects(destPath) { return errorJSON("MCP tools cannot modify their permissions file") }
     let sem = DispatchSemaphore(value: 0)
     var resultJSON = "{\"error\": \"Download failed\"}"
 
@@ -585,6 +597,12 @@ private func downloadFile(_ urlString: String, filename: String?) -> String {
             return
         }
 
+        // File download is also a write and must never replace policy configuration.
+        if currentToolPermissions().protects(destPath) {
+            resultJSON = errorJSON("MCP tools cannot modify their permissions file")
+            sem.signal()
+            return
+        }
         // Move to destination
         try? FileManager.default.removeItem(atPath: destPath)
         do {
@@ -713,11 +731,15 @@ private func vaultSearch(_ query: String, contentSearch: Bool) -> String {
 // each call is trivial overhead and picks up env changes without requiring
 // a process restart. Audit-log writes are serialized internally via a
 // module-level queue in ScopedFilesCore.
+private var scopedAuditLogPath: String {
+    ProcessInfo.processInfo.environment["ALLOWED_PATHS_AUDIT_LOG_PATH"]
+        ?? NSHomeDirectory() + "/.local/share/work-work/logs/allowed-paths-audit.log"
+}
+
 private var scopedFilesService: ScopedFilesService {
     ScopedFilesService(
         allowedPaths: loadAllowedPaths(from: ProcessInfo.processInfo.environment),
-        auditLogPath: ProcessInfo.processInfo.environment["ALLOWED_PATHS_AUDIT_LOG_PATH"]
-            ?? NSHomeDirectory() + "/.local/share/work-work/logs/allowed-paths-audit.log"
+        auditLogPath: scopedAuditLogPath
     )
 }
 
@@ -955,7 +977,8 @@ private func handleMCPRequest(_ request: HTTPRequest) -> Data {
         ], body: Data())
 
     case "tools/list":
-        let result = jsonRpcResult(id, ["tools": mcpTools])
+        let policy = currentToolPermissions()
+        let result = jsonRpcResult(id, ["tools": mcpTools.filter { policy.allows($0["name"] as? String ?? "") }])
         return sseResponse(sessionId: sessionId, events: [sseEvent(result)])
 
     case "tools/call":
@@ -966,8 +989,7 @@ private func handleMCPRequest(_ request: HTTPRequest) -> Data {
         let output = dispatchTool(toolName, toolArgs)
 
         var toolResult: [String: Any] = ["content": [["type": "text", "text": output]]]
-        if toolName.hasPrefix("mail_"),
-           let parsed = try? JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any],
+        if let parsed = try? JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any],
            parsed["error"] != nil { toolResult["isError"] = true }
         let result = jsonRpcResult(id, toolResult)
         return sseResponse(sessionId: sessionId, events: [sseEvent(result)])
@@ -1039,6 +1061,10 @@ func runServe(args: [String]) {
         }
         i += 1
     }
+
+    let initialPolicy = currentToolPermissions()
+    log(initialPolicy.error == nil ? .info : .error, .mcp,
+        initialPolicy.error ?? "MCP tool permissions loaded", extra: ["enabled_tools": mcpTools.filter { initialPolicy.allows($0["name"] as? String ?? "") }.count])
 
     // Start poller if webhook is configured
     if let url = webhookURL, let secret = webhookSecret {

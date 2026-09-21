@@ -4,7 +4,7 @@ The implementation was checked on 2026-09-20 and 2026-09-21 against synthetic fi
 
 ## Evidence
 
-- Docker Swift suite: 45 tests passed, zero failures, including existing access-control and scoped-file tests.
+- Docker Swift suite: 52 tests passed, zero failures, including existing access-control and scoped-file tests.
 
 - Universal arm64/x86_64 binary compiled with the macOS 13 deployment target.
 - Existing scoped-file MCP smoke test passed after rebasing onto current main.
