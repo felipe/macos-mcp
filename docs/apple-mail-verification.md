@@ -10,10 +10,10 @@ The implementation was checked on 2026-09-20 and 2026-09-21 against synthetic fi
 - Existing scoped-file MCP smoke test passed after rebasing onto current main.
 - Synthetic Mail CLI/MCP smoke passed for search, reading, mailbox listing, all nine tool schemas, and invalid-action rejection.
 - All six generated action scripts compiled against the installed Mail scripting dictionary. Script compilation does not verify Mail's runtime behavior or provider synchronization.
-- A read-only probe of the local index counted 139,575 messages and verified the global-message join. It confirmed row-ID cache filenames and space-padded `.emlx` byte prefixes, correcting two assumptions in the original plan.
+- A read-only probe of a populated local index verified the global-message join. It confirmed row-ID cache filenames and space-padded `.emlx` byte prefixes, correcting two assumptions in the original plan.
 - One live latest-message search completed in 13 ms. Reading that cached body completed in 822 ms after scoping file discovery to its indexed mailbox. These are individual observations, not latency guarantees.
 
-The initial Mail.app probe timed out. On 2026-09-21 it responded in 128 ms, and all six indexed IMAP account IDs matched Mail.app account IDs. Live lookup then exposed Gmail's omitted virtual folder root and a slow RFC Message-ID scan in All Mail. Both are addressed: account-scoped virtual-root fallback and direct numeric lookup with an RFC identity check.
+The initial Mail.app probe timed out. On 2026-09-21 it responded in 128 ms, and the indexed IMAP account IDs matched Mail.app account IDs. Live lookup then exposed Gmail's omitted virtual folder root and a slow RFC Message-ID scan in All Mail. Both are addressed: account-scoped virtual-root fallback and direct numeric lookup with an RFC identity check.
 
 The generated lookup resolved a real cached message in 1,432 ms and rejected a deliberately mismatched RFC Message-ID in 1,264 ms. The probe replaces the flag mutation with a return statement and rejects scripts containing action commands. Live mutations and delivery remain unverified; no message was changed or sent. Uncertain action results never trigger automatic retries.
 
