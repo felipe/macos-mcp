@@ -120,6 +120,9 @@ public enum MailActions {
             throw Error.invalidArgument("\(key) must not contain a NUL character")
         }
         var values = arguments
+        if let lookupID = arguments["lookup_id"], Int64(lookupID).map({ $0 > 0 }) != true {
+            throw Error.invalidArgument("lookup_id must be a positive integer")
+        }
         switch action {
         case "send", "draft":
             if action == "send" {
@@ -289,14 +292,27 @@ public enum MailActions {
         let rawMessageID = values["message_id"] ?? ""
         let normalizedMessageID = messageIDWithoutBrackets(rawMessageID)
         let bracketedMessageID = "<\(normalizedMessageID)>"
+        let selection: String
+        if let lookupID = values["lookup_id"], let numericID = Int64(lookupID) {
+            // The row ID is only a lookup hint. Verify the RFC identity before any mutation.
+            selection = """
+            set targetMessage to first message of sourceMailbox whose id is \(numericID)
+            set actualMessageID to message id of targetMessage
+            if actualMessageID is not normalizedMessageID and actualMessageID is not originalMessageID then error "Message identity mismatch; no action performed"
+            """
+        } else {
+            selection = """
+            set matchingMessages to every message of sourceMailbox whose (message id is normalizedMessageID or message id is originalMessageID)
+            if (count of matchingMessages) is 0 then error "No message matches message_id in the scoped mailbox"
+            if (count of matchingMessages) is not 1 then error "message_id is ambiguous in the scoped mailbox"
+            set targetMessage to item 1 of matchingMessages
+            """
+        }
         return """
         \(mailboxLookup(name: values["mailbox"] ?? "", account: values["account"], accountID: values["account_id"], result: "sourceMailbox"))
         set originalMessageID to \(asString(bracketedMessageID))
         set normalizedMessageID to \(asString(normalizedMessageID))
-        set matchingMessages to every message of sourceMailbox whose (message id is normalizedMessageID or message id is originalMessageID)
-        if (count of matchingMessages) is 0 then error "No message matches message_id in the scoped mailbox"
-        if (count of matchingMessages) is not 1 then error "message_id is ambiguous in the scoped mailbox"
-        set targetMessage to item 1 of matchingMessages
+        \(selection)
         """
     }
 
@@ -309,20 +325,31 @@ public enum MailActions {
             return "error \"Mailbox must be a non-empty slash-delimited path\""
         }
         let first = components[0]
-        let descendants = components.dropFirst().map { component in
+        let virtualRoot = components.count > 1 && ["[Gmail]", "[Google Mail]"].contains(first)
+        let descendants = components.dropFirst().enumerated().map { offset, component in
+            let lookup =
             """
             set matchingMailboxes to every mailbox of currentMailbox whose name is \(asString(component))
             if (count of matchingMailboxes) is 0 then error "No mailbox matches the supplied path"
             if (count of matchingMailboxes) is not 1 then error "Mailbox path is ambiguous"
             set currentMailbox to item 1 of matchingMailboxes
             """
+            return virtualRoot && offset == 0 ? "if not omittedVirtualRoot then\n" + lookup + "\nend if" : lookup
         }.joined(separator: "\n        ")
+        let virtualFallback = virtualRoot ? """
+        if (count of matchingMailboxes) is 0 then
+            set matchingMailboxes to every mailbox of scopedAccount whose name is \(asString(components[1]))
+            set omittedVirtualRoot to true
+        end if
+        """ : ""
         if let accountID, !accountID.isEmpty {
             return """
             set matchingAccounts to every account whose id is \(asString(accountID))
             if (count of matchingAccounts) is not 1 then error "No Mail account matches account_id; provide explicit account email instead"
             set scopedAccount to item 1 of matchingAccounts
+            set omittedVirtualRoot to false
             set matchingMailboxes to every mailbox of scopedAccount whose name is \(asString(first))
+            \(virtualFallback)
             if (count of matchingMailboxes) is 0 then error "No mailbox matches the supplied name and account scope"
             if (count of matchingMailboxes) is not 1 then error "Mailbox scope is ambiguous"
             set currentMailbox to item 1 of matchingMailboxes
@@ -335,7 +362,9 @@ public enum MailActions {
             set matchingAccounts to every account whose email addresses contains \(asString(account))
             if (count of matchingAccounts) is not 1 then error "No unique Mail account matches the supplied account scope"
             set scopedAccount to item 1 of matchingAccounts
+            set omittedVirtualRoot to false
             set matchingMailboxes to every mailbox of scopedAccount whose name is \(asString(first))
+            \(virtualFallback)
             if (count of matchingMailboxes) is 0 then error "No mailbox matches the supplied name and account scope"
             if (count of matchingMailboxes) is not 1 then error "Mailbox scope is ambiguous"
             set currentMailbox to item 1 of matchingMailboxes
@@ -344,6 +373,7 @@ public enum MailActions {
             """
         }
         return """
+        set omittedVirtualRoot to false
         set matchingMailboxes to {}
         repeat with candidateAccount in every account
             set accountMailboxes to every mailbox of candidateAccount whose name is \(asString(first))

@@ -60,6 +60,7 @@ func runMail(subcommand: String, args: [String]) {
                 let parsed = try readMailFile(db: db, rowid: rowid.int64Value, html: false)
                 guard let messageID = parsed.headers["message-id"], !messageID.isEmpty else { throw MailInputError(message: "Cached message has no RFC Message-ID; cannot safely target an action") }
                 actionArgs["message_id"] = messageID
+                actionArgs["lookup_id"] = rowid.stringValue
                 if let mailboxURL = URLComponents(string: summary.mailbox) {
                     if actionArgs["mailbox"] == nil { actionArgs["mailbox"] = mailboxURL.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
                     if actionArgs["account"] == nil, let host = mailboxURL.host { actionArgs["account_id"] = host }

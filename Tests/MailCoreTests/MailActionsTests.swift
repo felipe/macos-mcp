@@ -117,4 +117,19 @@ final class MailActionsTests: XCTestCase {
         XCTAssertThrowsError(try MailActions.buildScript(action: "flag", arguments: scoped.merging(["flagged": "perhaps"]) { _, new in new }))
         XCTAssertThrowsError(try MailActions.buildScript(action: "reply", arguments: scoped.merging(["reply_all": "perhaps"]) { _, new in new }))
     }
+    func testRowIDHintRequiresRFCIdentityBeforeMutation() throws {
+        let script = try MailActions.buildScript(action: "flag", arguments: [
+            "message_id": "<id@example.test>", "mailbox": "[Gmail]/All Mail",
+            "account_id": "test-account", "lookup_id": "42", "flagged": "true"
+        ])
+        XCTAssertTrue(script.contains("first message of sourceMailbox whose id is 42"))
+        XCTAssertTrue(script.contains("Message identity mismatch"))
+        XCTAssertFalse(script.contains("every message of sourceMailbox"))
+        XCTAssertTrue(script.contains("set omittedVirtualRoot to true"))
+        XCTAssertTrue(script.contains("whose name is \"All Mail\""))
+        XCTAssertThrowsError(try MailActions.buildScript(action: "flag", arguments: [
+            "message_id": "<id@example.test>", "mailbox": "INBOX", "lookup_id": "42\nerror", "flagged": "true"
+        ]))
+    }
+
 }

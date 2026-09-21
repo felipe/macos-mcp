@@ -10,7 +10,7 @@ let cases: [(String, [String: String])] = [
     ("send", ["to": "test@example.test", "cc": "other@example.test", "bcc": "hidden@example.test", "subject": "Quotes \" and slash \\", "body": "Line one\nLine two", "attachments": "/tmp/test attachment.pdf", "account": "sender@example.test"]),
     ("draft", ["subject": "Draft", "body": "Content"]),
     ("reply", ["message_id": "<test@example.test>", "mailbox": "INBOX", "account": "sender@example.test", "body": "Reply", "reply_all": "true"]),
-    ("forward", ["message_id": "<test@example.test>", "mailbox": "Parent/Child", "account_id": "test-id", "to": "test@example.test", "body": "Forward"]),
+    ("forward", ["message_id": "<test@example.test>", "mailbox": "[Gmail]/All Mail", "account_id": "test-id", "lookup_id": "42", "to": "test@example.test", "body": "Forward"]),
     ("move", ["message_id": "<test@example.test>", "mailbox": "INBOX", "target_mailbox": "Parent/Archive"]),
     ("flag", ["message_id": "<test@example.test>", "mailbox": "INBOX", "read": "true", "flagged": "false"]),
 ]
