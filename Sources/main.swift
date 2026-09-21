@@ -22,6 +22,10 @@ case "calendar":
     }
     runCalendar(subcommand: args[1], args: Array(args.dropFirst(2)))
 
+case "mail":
+    guard args.count >= 2 else { exitWithError("mail requires a subcommand: search|read|mailboxes|send|draft|reply|forward|move|flag") }
+    runMail(subcommand: args[1], args: Array(args.dropFirst(2)))
+
 case "messages":
     guard args.count >= 2 else {
         exitWithError("messages requires a subcommand: check|read|list-conversations|attachments|max-rowid")
@@ -61,6 +65,7 @@ func printUsage() -> Never {
       launch <command> [args...]              Run command with inherited FDA permissions
       icloud <subcommand> [args...]           iCloud Drive file operations
       calendar <subcommand> [args...]         Calendar operations via EventKit
+      mail <subcommand> [args...]             Apple Mail search, read, and actions (mail help for usage)
       messages <subcommand> [args...]         iMessage database operations
       send <subcommand> [args...]             Send messages via AppleScript
       typing <contact> <start|stop|keepalive> iMessage typing indicator

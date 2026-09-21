@@ -15,7 +15,7 @@ PLIST = $(HOME)/Library/LaunchAgents/com.macos-mcp.serve.plist
 LABEL = com.macos-mcp.serve
 GUI_DOMAIN = gui/$(shell id -u)
 
-.PHONY: all build clean restart install deploy test-logic test-logic-docker test-build
+.PHONY: all build clean restart install deploy test-logic test-logic-docker test-build test-mail test-permissions
 
 # Compile-only build for local/macOS smoke tests and CI checks
 build: $(UNSIGNED)
@@ -41,9 +41,17 @@ test-logic:
 
 # Convenience target for running logic tests in Docker.
 test-logic-docker:
-	docker run --rm -v "$$(pwd)":/src -w /src swift:6.0-jammy swift test
+	docker build -q -f scripts/logic-tests.Dockerfile -t macos-mcp-logic-tests scripts
+	docker run --rm -v "$$(pwd)":/src -w /src macos-mcp-logic-tests
 
 # macOS-only compile + smoke test path for the scoped file MCP tools.
+test-mail: build
+	./scripts/check-mail-applescript.sh
+	./scripts/smoke-mail.sh $(UNSIGNED)
+
+test-permissions: build
+	python3 scripts/smoke-permissions.py $(UNSIGNED)
+
 test-build: build
 	./scripts/smoke-scoped-files.sh $(UNSIGNED)
 
