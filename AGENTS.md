@@ -84,6 +84,8 @@ Testing:
 - Never equate SQLite row IDs or document IDs with AppleScript IDs. Resolve RFC Message-ID and reject ambiguity.
 - `make test-mail` exercises synthetic CLI/MCP fixtures without live Mail actions.
 - See [Mail contract and limitations](docs/apple-mail.md).
+- New Mail contract v1 and Himalaya MCP aliases live in `MailContract.swift` and `HimalayaAdapter.swift`; see [compatibility scope](docs/mail-compatibility.md).
+- Preserve alias-specific permission gates and preview-before-send behavior; never map `draft_reply` to the legacy immediate-send `mail_reply`.
 
 ### Calendar
 - `calendar_list` — list calendars

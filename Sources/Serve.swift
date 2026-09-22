@@ -394,7 +394,7 @@ private let mcpTools: [[String: Any]] = [
             "required": ["event_id"],
         ] as [String: Any],
     ],
-] + mailToolDefinitions
+] + mailToolDefinitions + mailContractDefinitions
 
 private func currentToolPermissions() -> ToolPermissions {
     ToolPermissions.load(knownTools: Set(mcpTools.compactMap { $0["name"] as? String }))
@@ -466,6 +466,9 @@ private func dispatchTool(_ name: String, _ input: [String: Any]) -> String {
     var subprocessTimeout: TimeInterval = 0
 
     switch name {
+    case let name where mailContractSpecs.contains(where: { $0.name == name }):
+        do { args = try mailContractCLIArguments(tool: name, input: input) }
+        catch { return errorJSON(error.localizedDescription) }
     case let name where name.hasPrefix("mail_"):
         do { args = try mailCLIArguments(tool: name, input: input) }
         catch {
@@ -1018,11 +1021,19 @@ private func handleMCPRequest(_ request: HTTPRequest) -> Data {
         let toolArgs = params["arguments"] as? [String: Any] ?? [:]
 
         log(.debug, .mcp, "Tool call", extra: ["tool": toolName])
-        let output = dispatchTool(toolName, toolArgs)
+        var output = dispatchTool(toolName, toolArgs)
+        let outputObject = (try? JSONSerialization.jsonObject(with: Data(output.utf8))) as? [String: Any]
+        let failed = outputObject?["error"] != nil
+        if himalayaToolNames.contains(toolName),
+           let parsed = try? JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any] {
+            if let text = parsed["text"] as? String { output = text }
+            else if let error = parsed["error"] as? String {
+                output = String(data: try! JSONSerialization.data(withJSONObject: ["error": ["code": "unknown", "message": error, "recoverable": false]]), encoding: .utf8)!
+            }
+        }
 
         var toolResult: [String: Any] = ["content": [["type": "text", "text": output]]]
-        if let parsed = try? JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any],
-           parsed["error"] != nil { toolResult["isError"] = true }
+        if failed { toolResult["isError"] = true }
         let result = jsonRpcResult(id, toolResult)
         return sseResponse(sessionId: sessionId, events: [sseEvent(result)])
 

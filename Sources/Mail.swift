@@ -2,8 +2,21 @@ import Foundation
 import CoreFoundation
 
 func runMail(subcommand: String, args: [String]) {
+    if subcommand == "api" {
+        do {
+            guard args.count == 2,
+                  let input = try JSONSerialization.jsonObject(with: Data(args[1].utf8)) as? [String: Any] else {
+                throw MailInputError(message: "Usage: mail api TOOL JSON_OBJECT")
+            }
+            _ = try mailContractCLIArguments(tool: args[0], input: input)
+            let result = try MailContract().execute(tool: args[0], input: input)
+            printJSON(result)
+        } catch { exitWithError(error.localizedDescription) }
+        return
+    }
     if subcommand == "help" || args == ["--help"] {
         printJSON(["usage": [
+            "mail api TOOL JSON_OBJECT (versioned Mail contract; mail_capabilities lists operations)",
             "mail search [QUERY] [--sender EMAIL] [--recipient EMAIL] [--subject TEXT] [--mailbox URL] [--since ISO_DATE] [--limit 20]",
             "mail read ROWID [--include-html] | mail read --message-id RFC_MESSAGE_ID",
             "mail mailboxes",

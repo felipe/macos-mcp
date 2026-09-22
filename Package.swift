@@ -1,7 +1,7 @@
 // swift-tools-version: 5.9
 import PackageDescription
 
-let mailSources = ["MailDB.swift", "MailParser.swift", "MailActions.swift", "MailInterface.swift"]
+let mailSources = ["MailDB.swift", "MailParser.swift", "MailActions.swift", "MailInterface.swift", "MailContract.swift", "HimalayaAdapter.swift"]
 let executableSources = ["Attachments.swift", "Calendar.swift", "ICloud.swift", "Launch.swift", "Mail.swift",
                          "Messages.swift", "Send.swift", "Serve.swift", "Shared.swift", "main.swift",
                          "Automation.swift", "Contacts.swift", "Notes.swift", "Permissions.swift", "Reminders.swift"]
