@@ -10,11 +10,13 @@ cleanup() {
 }
 trap cleanup EXIT
 export MAIL_DATA_DIR="$TMP_DIR/V10"
+export MACOS_MAIL_ACCOUNTS_JSON='{"work":{"id":"test-account","email":"me@example.test"}}'
 export MACOS_MCP_PERMISSIONS_FILE="$TMP_DIR/permissions.json"
 # Enable schemas for validation checks; no valid action calls are made.
 python3 - <<'POLICY'
 import json,os
 names = ['mail_search','mail_read','mail_list_mailboxes','mail_send','mail_draft','mail_reply','mail_forward','mail_move','mail_flag']
+names += ['mail_capabilities','mail_account_list','mail_mailbox_list','mail_envelope_list','mail_envelope_search','mail_message_read','mail_attachment_list','list_emails','search_emails','read_email','read_email_html','list_folders','compose_email']
 with open(os.environ['MACOS_MCP_PERMISSIONS_FILE'],'w') as f: json.dump({'version':1,'tools':{name:{'allow':True} for name in names}},f)
 POLICY
 python3 - <<'PY'
@@ -61,7 +63,7 @@ for _ in $(seq 1 60); do
   sleep 0.25
 done
 python3 - "$PORT" <<'PY'
-import json,sys,urllib.request
+import json,sys,urllib.request,os
 url='http://127.0.0.1:'+sys.argv[1]+'/mcp'
 def rpc(method,params):
  data=json.dumps(dict(jsonrpc='2.0',id=1,method=method,params=params)).encode()
@@ -77,5 +79,39 @@ for name,args,key in [('mail_search',{'query':'invoice'},'messages'),('mail_read
 # Invalid action requests stop in validation, before Mail.app can launch.
 for name,args in [('mail_send',{'to':'bad'}),('mail_flag',{'rowid':42,'read':'false'}),('mail_read',{'rowid':42,'message_id':'x'})]:
  r=rpc('tools/call',{'name':name,'arguments':args});assert r.get('isError') is True,r
-print('PASS: CLI search/read/mailboxes; all 9 MCP schemas; MCP read parity and invalid-action rejection')
+def call(name,args):
+ return rpc('tools/call',{'name':name,'arguments':args})
+cap=call('mail_capabilities',{})
+assert json.loads(cap['content'][0]['text'])['compatibility']['version']=='2.1.2',cap
+envelopes=json.loads(call('mail_envelope_list',{'account':'work','page_size':1})['content'][0]['text'])
+assert envelopes['has_more'] is False,envelopes
+identifier=envelopes['envelopes'][0]['id']
+assert identifier.startswith('am1.'),identifier
+assert 'rowid' not in envelopes['envelopes'][0],envelopes
+r=call('read_email',{'account':'work','id':identifier})
+assert not r.get('isError') and r['content'][0]['text']=='Synthetic mail body.',r
+r=call('list_emails',{'account':'work'})
+assert r['content'][0]['text'].startswith('Found 1 emails:'),r
+r=call('list_emails',{'account':'work','page':2})
+assert r['content'][0]['text']=='Found 0 emails:\n\n',r
+r=call('search_emails',{'account':'work','query':'subject invoice and flag Flagged'})
+assert 'Found 1 emails matching' in r['content'][0]['text'],r
+r=call('search_emails',{'account':'work','query':'body invoice'})
+assert r.get('isError') and json.loads(r['content'][0]['text'])['error']['recoverable'] is False,r
+r=call('read_email',{'account':'work','id':'42'})
+assert r.get('isError'),r
+compose={'account':'work','to':'you@example.test','subject':'Fixture preview','body':'Never sent'}
+r=call('compose_email',compose)
+assert not r.get('isError') and 'not sent' in r['content'][0]['text'],r
+# Neither aliases nor native mutations inherit another tool's grant.
+for name,args in [('flag_email',{'account':'work','id':identifier,'flags':['Seen'],'action':'add'}),
+                  ('mail_message_send',{'account':'work','to':['you@example.test'],'subject':'No send','body':'No send','confirm':True})]:
+ r=call(name,args);assert r.get('isError'),r
+# Revoke the preview tool, then prove even a confirmed call cannot bypass policy.
+with open(os.environ['MACOS_MCP_PERMISSIONS_FILE']) as f: policy=json.load(f)
+policy['tools']['compose_email']['allow']=False
+with open(os.environ['MACOS_MCP_PERMISSIONS_FILE'],'w') as f: json.dump(policy,f)
+r=call('compose_email',dict(compose,confirm=True));assert r.get('isError'),r
+assert 'compose_email' not in {x['name'] for x in rpc('tools/list',{})['tools']}
+print('PASS: legacy Mail CLI/MCP; v1 envelopes and opaque IDs; Himalaya text, search, previews; mutation denial and policy reload')
 PY

@@ -16,6 +16,9 @@ struct ToolPermissions {
         "calendar_list", "calendar_upcoming", "calendar_events", "calendar_search",
         "permissions_status", "notes_search", "notes_read", "reminders_list", "contacts_search",
         "mail_search", "mail_read", "mail_list_mailboxes",
+        "mail_capabilities", "mail_account_list", "mail_mailbox_list", "mail_envelope_list", "mail_envelope_search",
+        "mail_message_read", "mail_attachment_list",
+        "list_emails", "search_emails", "read_email", "read_email_html", "list_folders",
     ]
     let rules: [String: Rule]
     let policyPath: String

@@ -13,6 +13,17 @@ final class ToolPermissionsTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         return root
     }
+    func testMailCompatibilityMutationsRequireTheirOwnGrant() throws {
+        let reads: Set<String> = ["mail_capabilities", "mail_account_list", "mail_mailbox_list", "mail_envelope_list", "mail_envelope_search", "mail_message_read", "mail_attachment_list", "list_emails", "search_emails", "read_email", "read_email_html", "list_folders"]
+        let writes: Set<String> = ["mail_message_send", "mail_message_draft", "mail_message_reply", "mail_message_forward", "mail_message_move", "mail_flag_add", "mail_flag_remove", "compose_email", "flag_email", "move_email"]
+        let missing = try temp().appendingPathComponent("missing.json").path
+        let defaults = ToolPermissions.load(knownTools: reads.union(writes), environment: [:], defaultPath: missing)
+        for name in reads { XCTAssertTrue(defaults.allows(name), name) }
+        for name in writes { XCTAssertFalse(defaults.allows(name), name) }
+        let granted = try ToolPermissions.parse(JSONSerialization.data(withJSONObject: ["version": 1, "tools": ["mail_send": ["allow": true]]]), path: missing, knownTools: reads.union(writes).union(["mail_send"]))
+        XCTAssertFalse(granted.allows("compose_email"))
+        XCTAssertFalse(granted.allows("mail_message_send"))
+    }
     func testMissingDefaultAllowsOnlyKnownReadsAndExplicitMissingFailsClosed() throws {
         let missing = try temp().appendingPathComponent("missing.json").path
         let defaults = ToolPermissions.load(knownTools: known, environment: [:], defaultPath: missing)

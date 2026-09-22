@@ -9,6 +9,7 @@ struct MailInputError: LocalizedError {
 // A shared contract keeps MCP schemas, validation, and CLI translation together.
 struct MailToolSpec {
     let action: String
+    let toolName: String?
     let description: String
     let strings: [String]
     let arrays: [String]
@@ -16,11 +17,12 @@ struct MailToolSpec {
     let integers: [String]
     let required: [String]
     init(_ action: String, _ description: String, strings: [String] = [], arrays: [String] = [],
-         booleans: [String] = [], integers: [String] = [], required: [String] = []) {
+         booleans: [String] = [], integers: [String] = [], required: [String] = [], name: String? = nil) {
+        self.toolName = name
         self.action = action; self.description = description; self.strings = strings
         self.arrays = arrays; self.booleans = booleans; self.integers = integers; self.required = required
     }
-    var name: String { action == "mailboxes" ? "mail_list_mailboxes" : "mail_" + action }
+    var name: String { toolName ?? (action == "mailboxes" ? "mail_list_mailboxes" : "mail_" + action) }
 }
 
 let mailToolSpecs = [
@@ -35,14 +37,17 @@ let mailToolSpecs = [
     MailToolSpec("flag", "Set read and/or flagged status through Mail.app. Supply exactly one of rowid or RFC message_id. RFC message_id requires mailbox scope.", strings: ["message_id", "account", "mailbox"], booleans: ["read", "flagged"], integers: ["rowid"]),
 ]
 
-let mailToolDefinitions: [[String: Any]] = mailToolSpecs.map { spec in
+let mailToolDefinitions = mailDefinitions(mailToolSpecs)
+
+func mailDefinitions(_ specs: [MailToolSpec]) -> [[String: Any]] { specs.map { spec in
     var properties: [String: Any] = [:]
     for key in spec.strings { properties[key] = ["type": "string"] }
     for key in spec.arrays { properties[key] = ["type": "array", "items": ["type": "string", "minLength": 1], "minItems": spec.required.contains(key) ? 1 : 0] }
     for key in spec.booleans { properties[key] = ["type": "boolean"] }
     for key in spec.integers {
-        properties[key] = key == "limit" ? ["type": "integer", "minimum": 1, "maximum": 200] : ["type": "integer", "minimum": 1]
+        properties[key] = ["limit", "page_size"].contains(key) ? ["type": "integer", "minimum": 1, "maximum": 200] : ["type": "integer", "minimum": 1]
     }
+    if spec.integers.contains("page") { properties["page"] = ["type": "integer", "minimum": 1, "maximum": 1_000_000] }
     var schema: [String: Any] = ["type": "object", "properties": properties, "required": spec.required, "additionalProperties": false]
     if spec.integers.contains("rowid") { schema["oneOf"] = [["required": ["rowid"], "not": ["required": ["message_id"]]], ["required": ["message_id"], "not": ["required": ["rowid"]]]] }
     if spec.action != "read", spec.integers.contains("rowid") {
@@ -51,8 +56,10 @@ let mailToolDefinitions: [[String: Any]] = mailToolSpecs.map { spec in
     return ["name": spec.name, "description": spec.description, "inputSchema": schema]
 }
 
-func mailCLIArguments(tool: String, input: [String: Any]) throws -> [String] {
-    guard let spec = mailToolSpecs.first(where: { $0.name == tool }) else { throw MailInputError(message: "Unknown Mail tool") }
+}
+
+func mailCLIArguments(tool: String, input: [String: Any], specs: [MailToolSpec] = mailToolSpecs) throws -> [String] {
+    guard let spec = specs.first(where: { $0.name == tool }) else { throw MailInputError(message: "Unknown Mail tool") }
     let allowed = Set(spec.strings + spec.arrays + spec.booleans + spec.integers)
     guard Set(input.keys).isSubset(of: allowed) else { throw MailInputError(message: "Unknown parameter for \(tool)") }
     for key in spec.required where input[key] == nil { throw MailInputError(message: "\(key) is required") }
@@ -62,7 +69,7 @@ func mailCLIArguments(tool: String, input: [String: Any]) throws -> [String] {
     if spec.action != "read", spec.integers.contains("rowid"), input["message_id"] != nil {
         guard let mailbox = input["mailbox"] as? String, !mailbox.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw MailInputError(message: "message_id actions require mailbox scope") }
     }
-    if spec.action == "flag", input["read"] == nil && input["flagged"] == nil { throw MailInputError(message: "Supply read and/or flagged") }
+    if spec.name == "mail_flag", input["read"] == nil && input["flagged"] == nil { throw MailInputError(message: "Supply read and/or flagged") }
     var args = ["mail", spec.action]
     for key in input.keys.sorted() {
         let flag = "--" + key.replacingOccurrences(of: "_", with: "-")
@@ -79,7 +86,8 @@ func mailCLIArguments(tool: String, input: [String: Any]) throws -> [String] {
         } else {
             guard let value = input[key] as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(),
                   let integer = Int64(value.stringValue), integer > 0,
-                  key != "limit" || integer <= 200 else { throw MailInputError(message: "\(key) must be a positive integer\(key == "limit" ? " at most 200" : "")") }
+                  (!["limit", "page_size"].contains(key) || integer <= 200),
+                  (key != "page" || integer <= 1_000_000) else { throw MailInputError(message: "\(key) must be a positive integer\(key == "limit" ? " at most 200" : "")") }
             args += [flag, String(integer)]
         }
     }

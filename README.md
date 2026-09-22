@@ -152,3 +152,7 @@ skills/
 ## License
 
 MIT
+
+### Mail interoperability
+
+Mail contract v1 adds scoped accounts/mailboxes, paginated envelopes, opaque message IDs, and preview-before-send operations. Eight MCP tools implement a pinned Himalaya MCP subset. Existing Mail tools remain available. See [the compatibility contract, account setup, and limitations](docs/mail-compatibility.md).

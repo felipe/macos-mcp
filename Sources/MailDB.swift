@@ -12,6 +12,9 @@ struct MailSearchQuery {
     var subject: String?
     var mailbox: String?
     var since: Double?
+    var offset: Int = 0
+    var read: Bool?
+    var flagged: Bool?
     var limit: Int = 20
 
     init(query: String? = nil, sender: String? = nil, recipient: String? = nil,
@@ -159,7 +162,10 @@ final class MailDBConnection {
             clauses.append("m.date_received >= ?")
             bindings.append(.double(since))
         }
+        if let read = query.read { clauses.append("m.read = ?"); bindings.append(.int64(read ? 1 : 0)) }
+        if let flagged = query.flagged { clauses.append("m.flagged = ?"); bindings.append(.int64(flagged ? 1 : 0)) }
         bindings.append(.int64(Int64(limit)))
+        bindings.append(.int64(Int64(max(0, query.offset))))
 
         let sql = """
         SELECT m.ROWID, m.document_id, COALESCE(s.subject, ''),
@@ -171,7 +177,7 @@ final class MailDBConnection {
         LEFT JOIN mailboxes mb ON mb.ROWID = m.mailbox
         WHERE \(clauses.joined(separator: " AND "))
         ORDER BY m.date_received DESC, m.ROWID DESC
-        LIMIT ?
+        LIMIT ? OFFSET ?
         """
         return try summaries(sql: sql, bindings: bindings)
     }
@@ -253,7 +259,7 @@ final class MailDBConnection {
         return result
     }
 
-    private func messageIDHeader(rowid: Int64) throws -> String? {
+    func messageIDHeader(rowid: Int64) throws -> String? {
         guard supportsMessageIDHeaders else { return nil }
         let db = try database()
         let sql = "SELECT mgd.message_id_header FROM messages m JOIN message_global_data mgd ON mgd.ROWID = m.global_message_id WHERE m.ROWID = ?"

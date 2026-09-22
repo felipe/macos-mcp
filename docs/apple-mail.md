@@ -2,6 +2,8 @@
 
 `macos-mcp mail` reads Mail's local Envelope Index in read-only mode and parses cached `.emlx` messages. Actions use Mail.app's scripting interface so Mail handles provider synchronization. The binary has no additional runtime dependency beyond macOS.
 
+The additional [Mail contract v1 and Himalaya MCP adapter](mail-compatibility.md) provide consistent account/mailbox scope, opaque IDs, pagination, and preview-before-send tools. The legacy contract below remains supported.
+
 ## Usage
 
 ```sh
