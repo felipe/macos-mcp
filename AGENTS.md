@@ -47,7 +47,8 @@ This runs on the **agent's macOS account**, not the user's personal account. The
 Single universal binary handles all macOS system access. One Full Disk Access grant covers everything.
 
 ```
-macos-mcp serve [--port 9200] [--host 0.0.0.0]   # MCP server + iMessage poller
+macos-mcp serve [--port 9200] [--host ADDR ...]  # MCP server + iMessage poller (default 127.0.0.1)
+  [--mcp-token-file PATH]                          # Required for any non-loopback --host
   [--webhook-url URL] [--webhook-secret SECRET]    # Hermes webhook for inbound
   [--phone PHONE] [--poll-interval 1] [--debounce 3]
 macos-mcp launch <command> [args...]               # FDA process wrapper
@@ -120,10 +121,10 @@ Audit log: `ALLOWED_PATHS_AUDIT_LOG_PATH` env var or `~/.local/share/work-work/l
 
 Any MCP-compatible agent can connect to the serve endpoint:
 
-1. Point the agent's MCP client at `http://<mac-ip>:9200/mcp`
+1. Start `serve` with `--host <tailnet-ip>` and `--mcp-token-file` (non-loopback binds are opt-in and need a token), then point the agent's MCP client at `http://<tailnet-ip>:9200/mcp`
 2. Set up a webhook route for inbound messages (the poller POSTs with HMAC-SHA256)
 3. The agent gets all MCP tools (send, read, calendar, vault, scoped files) automatically
-4. Optional: set `--mcp-secret` for bearer token auth on the MCP endpoint
+4. Send `Authorization: Bearer <token>` from remote clients. Loopback callers need no token. See README "Network access"
 
 ## Logging
 
