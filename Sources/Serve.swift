@@ -953,7 +953,7 @@ private func sseResponse(sessionId: String, events: [Data]) -> Data {
 
 // MARK: - MCP Request Handler
 
-private func handleMCPRequest(_ request: HTTPRequest) -> Data {
+private func handleMCPRequest(_ request: HTTPRequest, requireAuth: Bool) -> Data {
     // CORS preflight
     if request.method == "OPTIONS" {
         return httpResponse(status: 204, statusText: "No Content", headers: [
@@ -966,10 +966,10 @@ private func handleMCPRequest(_ request: HTTPRequest) -> Data {
         return jsonResponse(status: 405, jsonRpcError(nil, code: -32000, message: "Method not allowed"))
     }
 
-    // Auth check: if --mcp-secret is set, require Authorization: Bearer <secret>
-    if let secret = mcpSecret {
-        let auth = request.headers["authorization"] ?? ""
-        guard auth == "Bearer \(secret)" else {
+    // Non-loopback listeners require Authorization: Bearer <token>. Startup
+    // refuses a non-loopback host without a token, so mcpToken is set here.
+    if requireAuth {
+        guard let token = mcpToken, ServeAccess.authorized(header: request.headers["authorization"], token: token) else {
             log(.warn, .mcp, "Unauthorized MCP request")
             return jsonResponse(status: 401, ["error": "Unauthorized"])
         }
@@ -1049,11 +1049,13 @@ private func handleMCPRequest(_ request: HTTPRequest) -> Data {
 
 // MARK: - TCP Server
 
-private var mcpSecret: String? = nil
+private var mcpToken: String? = nil
 
 func runServe(args: [String]) {
     var port: UInt16 = 9200
-    var host = "127.0.0.1"
+    var hosts: [String] = []
+    var tokenFile: String? = nil
+    var argvSecret: String? = nil
     var webhookURL: String? = nil
     var webhookSecret: String? = nil
     var phone: String = ""
@@ -1077,7 +1079,7 @@ func runServe(args: [String]) {
                 fputs("--host requires a value\n", stderr)
                 exit(1)
             }
-            host = args[i]
+            hosts.append(args[i])
         case "--webhook-url":
             i += 1; guard i < args.count else { fputs("--webhook-url requires a value\n", stderr); exit(1) }
             webhookURL = args[i]
@@ -1096,13 +1098,33 @@ func runServe(args: [String]) {
         case "--watermark-file":
             i += 1; guard i < args.count else { fputs("--watermark-file requires a value\n", stderr); exit(1) }
             watermarkPath = args[i]
+        case "--mcp-token-file":
+            i += 1; guard i < args.count else { fputs("--mcp-token-file requires a path\n", stderr); exit(1) }
+            tokenFile = args[i]
         case "--mcp-secret":
+            // Deprecated: argv is visible to every process. Use --mcp-token-file.
             i += 1; guard i < args.count else { fputs("--mcp-secret requires a value\n", stderr); exit(1) }
-            mcpSecret = args[i]
+            argvSecret = args[i]
         default:
             break
         }
         i += 1
+    }
+    if hosts.isEmpty { hosts = ["127.0.0.1"] }
+
+    do {
+        mcpToken = try ServeAccess.loadToken(tokenFile: tokenFile, environment: ProcessInfo.processInfo.environment)
+        if mcpToken == nil, let secret = argvSecret {
+            log(.warn, .server, "--mcp-secret puts the token in argv; use --mcp-token-file or MACOS_MCP_TOKEN_FILE")
+            mcpToken = try ServeAccess.validated(secret)
+        }
+    } catch {
+        log(.error, .server, "MCP token rejected", extra: ["error": "\(error)"])
+        exit(1)
+    }
+    if let refusal = ServeAccess.startupError(hosts: hosts, token: mcpToken) {
+        log(.error, .server, refusal)
+        exit(1)
     }
 
     let initialPolicy = currentToolPermissions()
@@ -1120,12 +1142,24 @@ func runServe(args: [String]) {
 
     let serverQueue = DispatchQueue(label: "mcp-server", attributes: .concurrent)
 
+    // One listener per --host. Loopback is open to local callers; any other
+    // address was opted into explicitly and requires the bearer token.
+    for host in hosts {
+        startListener(host: host, port: port, requireAuth: !ServeAccess.isLoopback(host), queue: serverQueue)
+    }
+
+    // Keep the process alive
+    dispatchMain()
+}
+
+private func startListener(host: String, port: UInt16, requireAuth: Bool, queue serverQueue: DispatchQueue) {
     let params = NWParameters.tcp
     params.allowLocalEndpointReuse = true
-    // Disable Nagle for low-latency responses
+    // Bind to the requested address only. Without requiredLocalEndpoint the
+    // listener accepts on every interface regardless of --host.
+    params.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!)
 
-
-    let listener = try! NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
+    let listener = try! NWListener(using: params)
 
     listener.newConnectionHandler = { connection in
         connection.start(queue: serverQueue)
@@ -1157,13 +1191,13 @@ func runServe(args: [String]) {
                             fullBody.append(moreData)
                         }
                         let fullRequest = HTTPRequest(method: request.method, path: request.path, headers: request.headers, body: fullBody)
-                        let response = handleRequest(fullRequest)
+                        let response = handleRequest(fullRequest, requireAuth: requireAuth)
                         sendAndClose(connection, response)
                     }
                     return
                 }
 
-                let response = handleRequest(request)
+                let response = handleRequest(request, requireAuth: requireAuth)
                 sendAndClose(connection, response)
             }
         }
@@ -1174,10 +1208,10 @@ func runServe(args: [String]) {
     listener.stateUpdateHandler = { state in
         switch state {
         case .ready:
-            log(.info, .server, "MCP server listening", extra: ["host": host, "port": port])
+            log(.info, .server, "MCP server listening", extra: ["host": host, "port": port, "auth": requireAuth ? "bearer" : "none"])
             log(.info, .server, "Streamable HTTP endpoint", extra: ["url": "http://\(host):\(port)/mcp"])
         case .failed(let error):
-            log(.error, .server, "Server failed", extra: ["error": "\(error)"])
+            log(.error, .server, "Server failed", extra: ["host": host, "error": "\(error)"])
             exit(1)
         default:
             break
@@ -1185,17 +1219,14 @@ func runServe(args: [String]) {
     }
 
     listener.start(queue: serverQueue)
-
-    // Keep the process alive
-    dispatchMain()
 }
 
-private func handleRequest(_ request: HTTPRequest) -> Data {
+private func handleRequest(_ request: HTTPRequest, requireAuth: Bool) -> Data {
     switch request.path.split(separator: "?").first.map(String.init) ?? request.path {
     case "/health":
         return jsonResponse(status: 200, ["status": "ok", "server": "macos-mcp"])
     case "/mcp":
-        return handleMCPRequest(request)
+        return handleMCPRequest(request, requireAuth: requireAuth)
     default:
         return jsonResponse(status: 404, ["error": "Not found"])
     }

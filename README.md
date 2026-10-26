@@ -39,6 +39,20 @@ macos-mcp serve --port 9200 \
 
 When `--webhook-url` is provided, the server also polls `chat.db` for inbound messages and POSTs them to the webhook with HMAC-SHA256 signing. Typing indicators are managed automatically (start on message, keepalive every 25s, stop when reply detected).
 
+### Network access
+
+By default the server listens on `127.0.0.1` only, and local callers need no token. Remote access is opt-in: name each extra address with another `--host`, and give the server a bearer token. It refuses to start on a non-loopback address without one.
+
+```bash
+openssl rand -hex 32 > ~/.config/macos-mcp/mcp-token && chmod 600 ~/.config/macos-mcp/mcp-token
+
+# Loopback for local callers, plus the Mac's tailnet address for remote agents
+macos-mcp serve --port 9200 --host 127.0.0.1 --host 100.x.y.z \
+  --mcp-token-file ~/.config/macos-mcp/mcp-token
+```
+
+Remote clients send `Authorization: Bearer <token>`; loopback listeners do not check it. The token can also come from `MACOS_MCP_TOKEN_FILE` or `MACOS_MCP_TOKEN`. The file must not be readable by other users (mode 600, no ACLs), and the token must be at least 32 characters. `--mcp-secret <token>` still works but is deprecated, because argv is visible to every process on the Mac. Prefer a specific address such as the tailnet IP over `0.0.0.0`, which also exposes the LAN.
+
 ### MCP Tools
 
 **iMessage**: `send_imessage`, `send_to_chat`, `send_file`, `check_messages`, `read_conversation`, `list_conversations`, `max_rowid`, `typing_indicator`
