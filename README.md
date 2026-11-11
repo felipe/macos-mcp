@@ -20,6 +20,7 @@ This repo now splits tests into two layers:
 make test-logic         # SwiftPM logic tests (Linux or macOS, requires swift)
 make test-logic-docker  # same logic tests in a Docker Swift image
 make test-build         # macOS-only compile + MCP smoke test for scoped_read/scoped_write
+make test-channel       # macOS-only compile + smoke test for the Claude Code channel
 ```
 
 - Logic tests cover pure allowlisted-path and markdown-write behavior in `ScopedFilesCore.swift`
@@ -38,6 +39,32 @@ macos-mcp serve --port 9200 \
 ```
 
 When `--webhook-url` is provided, the server also polls `chat.db` for inbound messages and POSTs them to the webhook with HMAC-SHA256 signing. Typing indicators are managed automatically (start on message, keepalive every 25s, stop when reply detected).
+
+### Claude Code channel
+
+`macos-mcp channel` connects the poller to a Claude Code session. Claude Code starts it as a stdio MCP server; it receives the poller's webhook on loopback, pushes each inbound text into the session as a channel event, and passes tool calls through to `serve` unchanged. It does not classify, rewrite, or answer messages.
+
+```bash
+# serve: point the poller at the channel
+macos-mcp serve --port 9200 \
+  --webhook-url "http://127.0.0.1:7888/incoming" \
+  --webhook-secret "your-hmac-secret" \
+  --phone "5551234567"
+
+# Claude Code: register the channel as an MCP server, then start a session with it
+claude mcp add macos-mcp -- macos-mcp channel --webhook-secret-file ~/.config/macos-mcp/webhook-secret
+claude --dangerously-load-development-channels server:macos-mcp
+```
+
+| Option | Default | |
+|---|---|---|
+| `--port` | `7888` | Webhook port. Loopback only. |
+| `--mcp-url` | `http://127.0.0.1:9200/mcp` | The `serve` instance to pass tool calls to. |
+| `--webhook-secret-file` | `MACOS_MCP_WEBHOOK_SECRET_FILE`, or the secret itself in `MACOS_MCP_WEBHOOK_SECRET` | Must match `serve --webhook-secret`. Unsigned or wrongly signed posts get a 401. |
+| `--owner-name` | `MACOS_MCP_OWNER_NAME` | Shown to the session as the sender. |
+| `--log-file` | none | JSON lines: texts delivered, tool calls, upstream failures. |
+
+The channel exits when the session closes its stdin, so `GET /health` on the webhook port answers only while a session is attached. Use that as the liveness check for "can a text reach the agent".
 
 ### Network access
 
@@ -144,6 +171,7 @@ Run `make test-mail` for the synthetic CLI/MCP smoke test.
 Sources/
   main.swift           # CLI router
   Serve.swift          # MCP server + poller + typing + vault/scoped-file tools
+  Channel.swift        # Claude Code channel: webhook in, session event out, tools passed through
   ScopedFilesCore.swift# Allowlisted path logic + markdown transforms + audit writes
   Shared.swift         # JSON output, process runner with timeouts
   Messages.swift       # SQLite message queries

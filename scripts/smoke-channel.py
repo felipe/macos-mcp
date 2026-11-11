@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Exercise `macos-mcp channel` against a temporary serve instance and temporary files only."""
+import hashlib
+import hmac
+import json
+import os
+import pathlib
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+
+binary = str(pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else '.build/macos-mcp-unsigned').resolve())
+SECRET = 'channel-smoke-secret'
+
+
+def free_port():
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0))
+        return sock.getsockname()[1]
+
+
+def wait_for(url):
+    for _ in range(60):
+        try:
+            urllib.request.urlopen(url, timeout=1).close()
+            return
+        except OSError:
+            time.sleep(.1)
+    raise AssertionError(f'{url} never came up')
+
+
+with tempfile.TemporaryDirectory(prefix='macos-mcp-channel-') as tmp:
+    root = pathlib.Path(tmp)
+    (root / 'note.md').write_text('Through the channel\n')
+    policy = root / 'permissions.json'
+    policy.write_text(json.dumps({'version': 1, 'tools': {'scoped_read': {'allow': True}}}))
+    secret_file = root / 'secret'
+    secret_file.write_text(SECRET + '\n')
+    env = dict(os.environ, MACOS_MCP_PERMISSIONS_FILE=str(policy),
+               ALLOWED_PATHS_JSON=json.dumps({'notes': str(root)}),
+               ALLOWED_PATHS_AUDIT_LOG_PATH=str(root / 'audit.log'), OBSIDIAN_VAULT_PATH=str(root))
+    serve_port, hook_port = free_port(), free_port()
+    hook = f'http://127.0.0.1:{hook_port}'
+
+    with (root / 'serve.log').open('w') as log:
+        serve = subprocess.Popen([binary, 'serve', '--host', '127.0.0.1', '--port', str(serve_port)],
+                                 env=env, stdout=log, stderr=log)
+        channel = subprocess.Popen(
+            [binary, 'channel', '--port', str(hook_port), '--mcp-url', f'http://127.0.0.1:{serve_port}/mcp',
+             '--webhook-secret-file', str(secret_file), '--owner-name', 'Smoke', '--log-file', str(root / 'channel.log')],
+            env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, text=True)
+        try:
+            wait_for(f'http://127.0.0.1:{serve_port}/health')
+            wait_for(hook + '/health')
+
+            def rpc(method, params=None, request_id=1):
+                channel.stdin.write(json.dumps({'jsonrpc': '2.0', 'id': request_id, 'method': method, 'params': params or {}}) + '\n')
+                channel.stdin.flush()
+                reply = json.loads(channel.stdout.readline())
+                assert reply['id'] == request_id, reply
+                return reply
+
+            def post(body, signature):
+                request = urllib.request.Request(hook + '/incoming', body,
+                                                 headers={'Content-Type': 'application/json', 'X-Hub-Signature-256': signature})
+                try:
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        return response.status
+                except urllib.error.HTTPError as error:
+                    return error.code
+
+            # The session is told this server is a channel, and how to answer a text.
+            init = rpc('initialize', {'protocolVersion': '2024-11-05', 'capabilities': {}})['result']
+            assert init['capabilities']['experimental'] == {'claude/channel': {}}, init
+            assert 'send_imessage' in init['instructions']
+
+            # Tools are the serve instance's tools, unchanged, and calls reach it.
+            assert [t['name'] for t in rpc('tools/list')['result']['tools']] == ['scoped_read']
+            read = rpc('tools/call', {'name': 'scoped_read', 'arguments': {'path_name': 'notes', 'path': 'note.md'}})['result']
+            assert not read.get('isError') and 'Through the channel' in read['content'][0]['text'], read
+            denied = rpc('tools/call', {'name': 'send_imessage', 'arguments': {'contact': '+15550000000', 'text': 'never sent'}})['result']
+            assert denied.get('isError'), denied
+            assert rpc('resources/list').get('error', {}).get('code') == -32601
+
+            # Only a correctly signed webhook becomes a channel event; the text arrives as written.
+            text = 'héllo\nsecond line'
+            body = json.dumps({'event': 'imessage', 'from': '+15550001111', 'text': text,
+                               'message_count': 2, 'rowids': [10, 11]}).encode()
+            good = 'sha256=' + hmac.new(SECRET.encode(), body, hashlib.sha256).hexdigest()
+            assert post(body, 'sha256=' + '0' * 64) == 401
+            assert post(body, 'sha256=' + hmac.new(b'wrong', body, hashlib.sha256).hexdigest()) == 401
+            assert post(b'{"event":"imessage"}', 'sha256=' + hmac.new(SECRET.encode(), b'{"event":"imessage"}', hashlib.sha256).hexdigest()) == 400
+            assert post(body, good) == 200
+            event = json.loads(channel.stdout.readline())
+            assert event['method'] == 'notifications/claude/channel', event
+            assert event['params']['content'] == text
+            assert event['params']['meta'] == {'chat_id': '+15550001111', 'user': 'Smoke', 'event': 'imessage',
+                                               'message_count': '2', 'rowid': '11'}, event
+
+            # A dead serve instance is reported to the model as a tool error, not swallowed.
+            serve.terminate()
+            serve.wait(timeout=5)
+            down = rpc('tools/call', {'name': 'scoped_read', 'arguments': {'path_name': 'notes', 'path': 'note.md'}})['result']
+            assert down.get('isError') and 'unreachable' in down['content'][0]['text'], down
+
+            # When the session goes away the channel exits and frees the webhook port.
+            channel.stdin.close()
+            assert channel.wait(timeout=5) == 0
+            try:
+                urllib.request.urlopen(hook + '/health', timeout=1)
+                raise AssertionError('webhook port still answering after the session closed')
+            except OSError:
+                pass
+        finally:
+            for process in (channel, serve):
+                if process.poll() is None:
+                    process.kill()
+print('channel smoke passed')
