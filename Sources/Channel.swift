@@ -20,6 +20,7 @@ private struct ChannelConfig {
     var secret: String?
     var logFile: String?
     var ownerName: String?
+    var ownerPhone: String?
 }
 
 // MARK: - Entry
@@ -29,6 +30,7 @@ func runChannel(args: [String]) -> Never {
     let env = ProcessInfo.processInfo.environment
     config.secret = env["MACOS_MCP_WEBHOOK_SECRET"]
     config.ownerName = env["MACOS_MCP_OWNER_NAME"]
+    config.ownerPhone = env["MACOS_MCP_OWNER_PHONE"]
     var secretFile = env["MACOS_MCP_WEBHOOK_SECRET_FILE"]
 
     var i = 0
@@ -47,6 +49,7 @@ func runChannel(args: [String]) -> Never {
         case "--webhook-secret-file": secretFile = value("--webhook-secret-file")
         case "--log-file": config.logFile = value("--log-file")
         case "--owner-name": config.ownerName = value("--owner-name")
+        case "--owner-phone": config.ownerPhone = value("--owner-phone")
         default: exitWithError("Unknown channel option: \(args[i])")
         }
         i += 1
@@ -128,9 +131,11 @@ private final class Channel {
                 ] as [String: Any],
                 "serverInfo": ["name": channelServerName, "version": appVersion],
                 "instructions": """
-                iMessage texts arrive as <channel source="\(channelServerName)" chat_id="..." user="...">. \
-                The sender only sees iMessage, never this session's output: answer with the send_imessage tool, \
-                passing the chat_id value as contact. One event may carry several texts joined by newlines.
+                iMessage texts arrive as <channel source="\(channelServerName)" chat_id="..." chat_type="direct|group" user="...">. \
+                The sender only sees iMessage, never this session's output. Answer a direct chat with send_imessage, \
+                passing chat_id as contact. Answer a group chat with send_to_chat, passing chat_id as chat_id. \
+                user is the owner's name only when the text came from the owner's own number; otherwise it is the \
+                sender's address or the group's id. One event may carry several texts joined by newlines.
                 """,
             ])
         case "ping":
@@ -272,16 +277,19 @@ private final class Channel {
             var buffer = buffer
             if let data = data { buffer.append(data) }
 
-            if let request = ChannelHTTPRequest(buffer) {
+            switch ChannelHTTPRequest.parse(buffer) {
+            case .request(let request):
                 let (status, body) = self.handleWebhook(request)
                 self.reply(connection, status: status, body: body)
-                return
+            case .malformed:
+                self.reply(connection, status: 400, body: "{\"error\":\"malformed request\"}")
+            case .incomplete:
+                if isComplete || error != nil || buffer.count > channelMaxBody + 65_536 {
+                    connection.cancel()
+                } else {
+                    self.receive(connection, buffer: buffer)
+                }
             }
-            if isComplete || error != nil || buffer.count > 4_194_304 {
-                connection.cancel()
-                return
-            }
-            self.receive(connection, buffer: buffer)
         }
     }
 
@@ -314,9 +322,19 @@ private final class Channel {
         }
 
         // Meta values become attributes on the channel tag; they must be strings.
+        // The poller sends chat.db's chat_identifier: a phone number or email for a
+        // direct chat, "chat<digits>" for a group. The two need different reply tools.
+        let chatID = json["chat_id"] as? String ?? from
+        let isGroup = chatID.hasPrefix("chat")
+        // Only call the sender the owner when the text came from the owner's own number.
+        var user = from
+        if !isGroup, let name = config.ownerName, let phone = config.ownerPhone, samePhone(from, phone) {
+            user = name
+        }
         var meta: [String: String] = [
-            "chat_id": json["chat_id"] as? String ?? from,
-            "user": config.ownerName ?? from,
+            "chat_id": chatID,
+            "chat_type": isGroup ? "group" : "direct",
+            "user": user,
             "event": json["event"] as? String ?? "message",
         ]
         if let count = json["message_count"] as? Int { meta["message_count"] = String(count) }
@@ -360,32 +378,55 @@ private final class Channel {
 
 // MARK: - Helpers
 
-/// Minimal HTTP/1.1 request parser. Returns nil until headers and the full body have arrived.
+/// Largest webhook body accepted. A poller batch is a few texts; anything near this is not one.
+private let channelMaxBody = 1_048_576
+
+private enum ChannelHTTPParse {
+    case incomplete
+    case malformed
+    case request(ChannelHTTPRequest)
+}
+
+/// Minimal HTTP/1.1 request parser for the webhook listener.
 private struct ChannelHTTPRequest {
     let method: String
     let path: String
     let headers: [String: String]
     let body: Data
 
-    init?(_ data: Data) {
-        guard let split = data.range(of: Data("\r\n\r\n".utf8)),
-              let head = String(data: data[data.startIndex..<split.lowerBound], encoding: .utf8) else { return nil }
+    /// `.incomplete` until the headers and the declared body have arrived. This runs
+    /// before the signature check, so it must not trap on anything a local process can send.
+    static func parse(_ data: Data) -> ChannelHTTPParse {
+        guard let split = data.range(of: Data("\r\n\r\n".utf8)) else { return .incomplete }
+        guard let head = String(data: data[data.startIndex..<split.lowerBound], encoding: .utf8) else { return .malformed }
         let lines = head.components(separatedBy: "\r\n")
         let requestLine = lines.first?.split(separator: " ") ?? []
-        guard requestLine.count >= 2 else { return nil }
+        guard requestLine.count >= 2 else { return .malformed }
         var headers: [String: String] = [:]
         for line in lines.dropFirst() {
             guard let colon = line.firstIndex(of: ":") else { continue }
             headers[line[..<colon].lowercased()] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
         }
+        var length = 0
+        if let declared = headers["content-length"] {
+            guard let parsed = Int(declared), parsed >= 0, parsed <= channelMaxBody else { return .malformed }
+            length = parsed
+        }
         let body = data[split.upperBound...]
-        let length = Int(headers["content-length"] ?? "0") ?? 0
-        guard body.count >= length else { return nil }
-        self.method = String(requestLine[0])
-        self.path = String(requestLine[1].split(separator: "?").first ?? requestLine[1])
-        self.headers = headers
-        self.body = Data(body.prefix(length))
+        guard body.count >= length else { return .incomplete }
+        return .request(ChannelHTTPRequest(
+            method: String(requestLine[0]),
+            path: String(requestLine[1].split(separator: "?").first ?? requestLine[1]),
+            headers: headers,
+            body: Data(body.prefix(length))))
     }
+}
+
+/// Same number, ignoring formatting and a leading country code on either side.
+private func samePhone(_ a: String, _ b: String) -> Bool {
+    let x = a.filter(\.isNumber), y = b.filter(\.isNumber)
+    guard x.count >= 10, y.count >= 10 else { return !x.isEmpty && x == y }
+    return x == y || x.suffix(10) == y.suffix(10)
 }
 
 private func channelHMAC(_ data: Data, key: String) -> String {

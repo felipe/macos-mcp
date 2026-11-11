@@ -51,7 +51,8 @@ with tempfile.TemporaryDirectory(prefix='macos-mcp-channel-') as tmp:
                                  env=env, stdout=log, stderr=log)
         channel = subprocess.Popen(
             [binary, 'channel', '--port', str(hook_port), '--mcp-url', f'http://127.0.0.1:{serve_port}/mcp',
-             '--webhook-secret-file', str(secret_file), '--owner-name', 'Smoke', '--log-file', str(root / 'channel.log')],
+             '--webhook-secret-file', str(secret_file), '--owner-name', 'Smoke', '--owner-phone', '+1 (555) 000-1111',
+             '--log-file', str(root / 'channel.log')],
             env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, text=True)
         try:
             wait_for(f'http://127.0.0.1:{serve_port}/health')
@@ -98,8 +99,25 @@ with tempfile.TemporaryDirectory(prefix='macos-mcp-channel-') as tmp:
             event = json.loads(channel.stdout.readline())
             assert event['method'] == 'notifications/claude/channel', event
             assert event['params']['content'] == text
-            assert event['params']['meta'] == {'chat_id': '+15550001111', 'user': 'Smoke', 'event': 'imessage',
-                                               'message_count': '2', 'rowid': '11'}, event
+            assert event['params']['meta'] == {'chat_id': '+15550001111', 'chat_type': 'direct', 'user': 'Smoke',
+                                               'event': 'imessage', 'message_count': '2', 'rowid': '11'}, event
+
+            # Only the owner's own number is called the owner; a group is marked as one.
+            def deliver(sender):
+                payload = json.dumps({'event': 'imessage', 'from': sender, 'text': 'hi'}).encode()
+                assert post(payload, 'sha256=' + hmac.new(SECRET.encode(), payload, hashlib.sha256).hexdigest()) == 200
+                return json.loads(channel.stdout.readline())['params']['meta']
+            stranger = deliver('+15559998888')
+            assert stranger['user'] == '+15559998888' and stranger['chat_type'] == 'direct', stranger
+            group = deliver('chat123456789')
+            assert group['user'] == 'chat123456789' and group['chat_type'] == 'group', group
+
+            # Bad framing is refused before the signature check and does not take the channel down.
+            for length in ('-1', 'abc', str(64 * 1024 * 1024)):
+                with socket.create_connection(('127.0.0.1', hook_port), timeout=5) as raw:
+                    raw.sendall(f'POST /incoming HTTP/1.1\r\nContent-Length: {length}\r\n\r\n'.encode())
+                    assert raw.recv(64).startswith(b'HTTP/1.1 400'), length
+            urllib.request.urlopen(hook + '/health', timeout=2).close()
 
             # A dead serve instance is reported to the model as a tool error, not swallowed.
             serve.terminate()
