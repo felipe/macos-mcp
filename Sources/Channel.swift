@@ -225,8 +225,15 @@ private final class Channel {
                 outcome = .failure(.init(message: error.localizedDescription))
                 return
             }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            // serve answers a bad token (and other transport errors) with a non-2xx
+            // status and a body that is not a JSON-RPC reply. Never pass that on as one.
+            guard (200..<300).contains(status) else {
+                let detail = data.flatMap { String(data: $0.prefix(200), encoding: .utf8) } ?? ""
+                outcome = .failure(.init(message: "HTTP \(status) \(detail)".trimmingCharacters(in: .whitespaces)))
+                return
+            }
             guard let data = data, let reply = Channel.parseReply(data) else {
-                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
                 outcome = .failure(.init(message: "unreadable reply (HTTP \(status))"))
                 return
             }
@@ -238,8 +245,10 @@ private final class Channel {
 
     /// The serve process answers as an SSE stream or as plain JSON; accept both.
     private static func parseReply(_ data: Data) -> [String: Any]? {
-        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           object["result"] != nil || object["error"] != nil {
+        func isReply(_ object: [String: Any]) -> Bool {
+            object["result"] is [String: Any] || object["error"] is [String: Any]
+        }
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any], isReply(object) {
             return object
         }
         guard let raw = String(data: data, encoding: .utf8) else { return nil }
@@ -247,8 +256,7 @@ private final class Channel {
         for line in raw.split(whereSeparator: \.isNewline) where line.hasPrefix("data:") {
             let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
             if let d = payload.data(using: .utf8),
-               let object = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-               object["result"] != nil || object["error"] != nil {
+               let object = try? JSONSerialization.jsonObject(with: d) as? [String: Any], isReply(object) {
                 found = object
             }
         }

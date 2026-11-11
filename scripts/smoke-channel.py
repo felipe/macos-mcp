@@ -158,13 +158,16 @@ with tempfile.TemporaryDirectory(prefix='macos-mcp-channel-') as tmp:
     token_file.write_text(token + '\n')
     token_file.chmod(0o600)
     seen = []
+    reject = False
 
     class Upstream(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
             seen.append(self.headers.get('Authorization'))
             self.rfile.read(int(self.headers.get('Content-Length', 0)))
-            reply = json.dumps({'jsonrpc': '2.0', 'id': 1, 'result': {'tools': []}}).encode()
-            self.send_response(200)
+            # Like serve: a token it does not accept gets a 401 that is not a JSON-RPC reply.
+            accepted = not reject
+            reply = json.dumps({'jsonrpc': '2.0', 'id': 1, 'result': {'tools': []}} if accepted else {'error': 'Unauthorized'}).encode()
+            self.send_response(200 if accepted else 401)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(reply)))
             self.end_headers()
@@ -185,6 +188,14 @@ with tempfile.TemporaryDirectory(prefix='macos-mcp-channel-') as tmp:
             channel.stdin.flush()
             assert json.loads(channel.stdout.readline())['result'] == {'tools': []}
             assert seen == [f'Bearer {token}'], seen
+            # A refused token surfaces as an error, never as an empty success.
+            reject = True
+            channel.stdin.write(json.dumps({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list'}) + '\n')
+            channel.stdin.write(json.dumps({'jsonrpc': '2.0', 'id': 3, 'method': 'tools/call', 'params': {'name': 'x', 'arguments': {}}}) + '\n')
+            channel.stdin.flush()
+            replies = {r['id']: r for r in (json.loads(channel.stdout.readline()) for _ in range(2))}
+            assert '401' in replies[2]['error']['message'], replies[2]
+            assert replies[3]['result']['isError'] and '401' in replies[3]['result']['content'][0]['text'], replies[3]
             channel.stdin.close()
             assert channel.wait(timeout=5) == 0
         finally:
