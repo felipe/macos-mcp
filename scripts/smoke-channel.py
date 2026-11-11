@@ -42,6 +42,10 @@ with tempfile.TemporaryDirectory(prefix='macos-mcp-channel-') as tmp:
     policy.write_text(json.dumps({'version': 1, 'tools': {'scoped_read': {'allow': True}}}))
     secret_file = root / 'secret'
     secret_file.write_text(SECRET + '\n')
+    secret_file.chmod(0o600)
+    exposed = root / 'exposed-secret'
+    exposed.write_text(SECRET + '\n')
+    exposed.chmod(0o644)
     env = dict(os.environ, MACOS_MCP_PERMISSIONS_FILE=str(policy),
                ALLOWED_PATHS_JSON=json.dumps({'notes': str(root)}),
                ALLOWED_PATHS_AUDIT_LOG_PATH=str(root / 'audit.log'), OBSIDIAN_VAULT_PATH=str(root))
@@ -139,6 +143,11 @@ with tempfile.TemporaryDirectory(prefix='macos-mcp-channel-') as tmp:
             serve.wait(timeout=5)
             down = rpc('tools/call', {'name': 'scoped_read', 'arguments': {'path_name': 'notes', 'path': 'note.md'}})['result']
             assert down.get('isError') and 'unreachable' in down['content'][0]['text'], down
+
+            # A secret other users can read is refused.
+            loose = subprocess.run([binary, 'channel', '--port', str(free_port()), '--webhook-secret-file', str(exposed)],
+                                   env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+            assert loose.returncode != 0 and 'readable by other users' in loose.stderr, loose
 
             # A second channel on the same port refuses to start instead of running deaf.
             second = subprocess.run(

@@ -60,8 +60,15 @@ func runChannel(args: [String]) -> Never {
 
     if let path = secretFile {
         let expanded = NSString(string: path).expandingTildeInPath
-        guard let raw = try? String(contentsOfFile: expanded, encoding: .utf8) else {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: expanded),
+              let raw = try? String(contentsOfFile: expanded, encoding: .utf8) else {
             exitWithError("Cannot read webhook secret file: \(path)")
+        }
+        // Same rule as the MCP token file: whoever can read this can sign a webhook
+        // and speak to the agent as an allowed sender.
+        let mode = (attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0
+        if mode & 0o077 != 0 || ServeAccess.hasExtendedACL(expanded) {
+            exitWithError("Webhook secret file \(path) is readable by other users; chmod 600 it and remove any ACL")
         }
         config.secret = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -433,6 +440,11 @@ private final class Channel {
 
     /// Write a channel event, or hold it if the client has not finished initializing.
     /// Returns false when held.
+    ///
+    /// The write is synchronous on the listener's queue on purpose. If the session
+    /// stops reading its stdin pipe, texts are not reaching it, and the listener
+    /// stalling with it is the honest signal: the poller's POST times out and
+    /// GET /health stops answering, so a watchdog sees a channel that cannot deliver.
     private func emit(_ event: [String: Any]) -> Bool {
         eventLock.lock()
         defer { eventLock.unlock() }
