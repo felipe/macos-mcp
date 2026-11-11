@@ -77,6 +77,17 @@ final class AccessControlTests: XCTestCase {
         XCTAssertTrue(config.isAllowed(from: "friend@example.com", chat: "chat@example.com"))
     }
 
+    func testEmailHandleWithOwnerDigitsIsNotTheOwner() {
+        // Anyone can register an Apple ID such as 15551234567@example.com. It must
+        // not pass an allowlist that names the phone number +1 555 123 4567.
+        let config = AccessConfig.load(environment: ["MACOS_MCP_OWNER_PHONE": "+15551234567"])
+        XCTAssertTrue(config.isAllowed(from: "+15551234567", chat: ""))
+        XCTAssertFalse(config.isAllowed(from: "15551234567@example.com", chat: ""))
+        XCTAssertFalse(config.isAllowed(from: "5551234567@example.com", chat: ""))
+        XCTAssertFalse(config.isAllowed(from: "+15551234567@example.com", chat: ""))
+        XCTAssertFalse(config.isAllowedRecipient("joe15551234567@example.com"))
+    }
+
     // MARK: - normalizePhone()
 
     func testNormalizePhone() {
@@ -85,6 +96,8 @@ final class AccessControlTests: XCTestCase {
         XCTAssertEqual(AccessConfig.normalizePhone("15551234567"), "+15551234567")
         XCTAssertEqual(AccessConfig.normalizePhone("+445551234567"), "+445551234567")
         XCTAssertEqual(AccessConfig.normalizePhone("Friend@Example.com"), "friend@example.com")
+        XCTAssertEqual(AccessConfig.normalizePhone("15551234567@Example.com"), "15551234567@example.com")
+        XCTAssertEqual(AccessConfig.normalizePhone("+15551234567@example.com"), "+15551234567@example.com")
     }
 
     func testIsGroupIdentifier() {

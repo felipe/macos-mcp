@@ -98,6 +98,9 @@ struct AccessConfig {
     /// Normalize a phone number to E.164 for consistent matching. Non-phone
     /// handles (email addresses) are lowercased and returned unchanged.
     static func normalizePhone(_ phone: String) -> String {
+        // An email handle is never a phone number, whatever digits it contains:
+        // 15551234567@example.com must not normalize to +15551234567.
+        if phone.contains("@") { return phone.lowercased() }
         let stripped = phone.filter { $0.isNumber || $0 == "+" }
         if stripped.hasPrefix("+") { return stripped }
         let digits = stripped.filter { $0.isNumber }
