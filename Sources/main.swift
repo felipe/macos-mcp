@@ -44,6 +44,9 @@ case "typing":
 case "serve":
     runServe(args: Array(args.dropFirst()))
 
+case "channel":
+    runChannel(args: Array(args.dropFirst()))
+
 case "--version", "version":
     printJSON(["version": appVersion, "name": "macos-mcp"])
     exit(0)
@@ -70,6 +73,7 @@ func printUsage() -> Never {
       send <subcommand> [args...]             Send messages via AppleScript
       typing <contact> <start|stop|keepalive> iMessage typing indicator
       serve [--port 9200] [--host 0.0.0.0]   Run MCP server (Streamable HTTP)
+      channel [--port 7888] [--mcp-url URL]   Claude Code channel: push inbound texts into a session (stdio)
 
     Calendar subcommands:
       list                                    List all visible calendars

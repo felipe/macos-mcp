@@ -51,6 +51,8 @@ macos-mcp serve [--port 9200] [--host ADDR ...]  # MCP server + iMessage poller 
   [--mcp-token-file PATH]                          # Required for any non-loopback --host
   [--webhook-url URL] [--webhook-secret SECRET]    # Hermes webhook for inbound
   [--phone PHONE] [--poll-interval 1] [--debounce 3]
+macos-mcp channel [--port 7888] [--mcp-url URL]    # Claude Code channel (stdio): webhook -> session
+  [--webhook-secret-file PATH] [--log-file PATH]
 macos-mcp launch <command> [args...]               # FDA process wrapper
 macos-mcp icloud sync --source DIR --cache DIR --files F1,F2 [-- cmd args...]
 macos-mcp calendar list|events|upcoming|search|create|update|delete [args...]
@@ -65,6 +67,7 @@ Testing:
 - `make test-logic` — SwiftPM logic tests for allowlisted path + markdown transforms
 - `make test-logic-docker` — same logic tests in a Docker Swift image
 - `make test-build` — macOS-only compile + MCP smoke test for `scoped_read` / `scoped_write`
+- `make test-channel` — macOS-only compile + smoke test for `macos-mcp channel`
 
 ## MCP Tools (exposed via `serve`)
 

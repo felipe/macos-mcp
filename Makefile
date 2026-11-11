@@ -15,7 +15,7 @@ PLIST = $(HOME)/Library/LaunchAgents/com.macos-mcp.serve.plist
 LABEL = com.macos-mcp.serve
 GUI_DOMAIN = gui/$(shell id -u)
 
-.PHONY: all build clean restart install deploy test-logic test-logic-docker test-build test-mail test-permissions
+.PHONY: all build clean restart install deploy test-logic test-logic-docker test-build test-mail test-permissions test-channel
 
 # Compile-only build for local/macOS smoke tests and CI checks
 build: $(UNSIGNED)
@@ -51,6 +51,9 @@ test-mail: build
 
 test-permissions: build
 	python3 scripts/smoke-permissions.py $(UNSIGNED)
+
+test-channel: build
+	python3 scripts/smoke-channel.py $(UNSIGNED)
 
 test-build: build
 	./scripts/smoke-scoped-files.sh $(UNSIGNED)
