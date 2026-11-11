@@ -140,6 +140,23 @@ with tempfile.TemporaryDirectory(prefix='macos-mcp-channel-') as tmp:
             down = rpc('tools/call', {'name': 'scoped_read', 'arguments': {'path_name': 'notes', 'path': 'note.md'}})['result']
             assert down.get('isError') and 'unreachable' in down['content'][0]['text'], down
 
+            # A second channel on the same port refuses to start instead of running deaf.
+            second = subprocess.run(
+                [binary, 'channel', '--port', str(hook_port), '--webhook-secret-file', str(secret_file)],
+                env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+            assert second.returncode != 0 and 'cannot listen' in second.stderr, second
+
+            # A connection that never finishes its request is dropped, and stalled
+            # connections cannot crowd out a real post.
+            stalled = [socket.create_connection(('127.0.0.1', hook_port), timeout=5) for _ in range(40)]
+            for raw in stalled:
+                raw.sendall(b'POST /incoming HTTP/1.1\r\nContent-Length: 10\r\n\r\n')
+            time.sleep(11)
+            assert stalled[0].recv(16) == b''
+            for raw in stalled:
+                raw.close()
+            urllib.request.urlopen(hook + '/health', timeout=2).close()
+
             # When the session goes away the channel exits and frees the webhook port.
             channel.stdin.close()
             assert channel.wait(timeout=5) == 0

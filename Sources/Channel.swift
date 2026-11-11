@@ -92,6 +92,7 @@ private final class Channel {
     private let work = DispatchQueue(label: "macos-mcp.channel.work", attributes: .concurrent)
     private let net = DispatchQueue(label: "macos-mcp.channel.net")
     private var listener: NWListener?
+    private var openConnections = 0  // touched only on `net`
     // Events that arrive before the client finishes its MCP handshake are held and
     // delivered in order once it has. The poller does not resend an accepted text.
     private let eventLock = NSLock()
@@ -265,39 +266,89 @@ private final class Channel {
 
     // MARK: webhook listener
 
+    /// Bind the webhook port before the MCP handshake is answered. A channel that
+    /// talks to its session but cannot hear the poller looks healthy and is not, so
+    /// there is no such state: the port is bound, or the process exits and the
+    /// session reports a failed MCP server. A previous channel can hold the port for
+    /// a moment during a restart, hence the short wait.
     private func startListener() {
+        let deadline = Date().addingTimeInterval(channelBindWait)
+        var lastError = "unknown"
+        while true {
+            switch bindOnce() {
+            case .success:
+                return
+            case .failure(let failure):
+                lastError = failure.message
+                log("webhook port not available yet", ["port": Int(config.port), "error": lastError])
+            }
+            if Date() >= deadline { break }
+            Thread.sleep(forTimeInterval: 2)
+        }
+        exitWithError("channel cannot listen on \(config.host):\(config.port) (\(lastError)). "
+            + "Another channel may hold the port; give each session its own --port.")
+    }
+
+    private func bindOnce() -> Result<Void, UpstreamFailure> {
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
         params.requiredLocalEndpoint = .hostPort(
             host: NWEndpoint.Host(config.host), port: NWEndpoint.Port(rawValue: config.port)!)
-
         guard let listener = try? NWListener(using: params) else {
-            log("webhook listener could not be created, retrying", ["port": Int(config.port)])
-            net.asyncAfter(deadline: .now() + 3) { self.startListener() }
-            return
+            return .failure(.init(message: "listener could not be created"))
         }
-        self.listener = listener
+
+        let settled = DispatchSemaphore(value: 0)
+        var outcome: Result<Void, UpstreamFailure>?
         listener.newConnectionHandler = { [weak self] connection in
-            guard let self = self else { return }
-            connection.start(queue: self.net)
-            self.receive(connection, buffer: Data())
+            self?.accept(connection)
         }
         listener.stateUpdateHandler = { [weak self] state in
             guard let self = self else { return }
             switch state {
             case .ready:
                 self.log("webhook listening", ["host": self.config.host, "port": Int(self.config.port)])
+                if outcome == nil { outcome = .success(()); settled.signal() }
             case .failed(let error):
-                // Usually the port is still held by a previous process. Keep trying:
-                // a channel that cannot hear the poller is useless, so never settle.
-                self.log("webhook listener failed, retrying", ["error": "\(error)"])
-                listener.cancel()
-                self.net.asyncAfter(deadline: .now() + 3) { self.startListener() }
+                if outcome == nil {
+                    outcome = .failure(.init(message: "\(error)"))
+                    listener.cancel()
+                    settled.signal()
+                } else {
+                    // Lost the port after startup: same rule, do not stay up deaf.
+                    self.log("webhook listener failed, exiting", ["error": "\(error)"])
+                    exit(1)
+                }
             default:
                 break
             }
         }
         listener.start(queue: net)
+        settled.wait()
+        if case .success = outcome { self.listener = listener }
+        return outcome ?? .failure(.init(message: "no listener state"))
+    }
+
+    /// Runs on `net`. Posts are small and local, so a connection gets a few seconds
+    /// and the listener a bounded number of them: nothing here is authenticated yet.
+    private func accept(_ connection: NWConnection) {
+        guard openConnections < channelMaxConnections else {
+            connection.cancel()
+            return
+        }
+        openConnections += 1
+        connection.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .cancelled, .failed:
+                connection.stateUpdateHandler = nil
+                self?.openConnections -= 1
+            default:
+                break
+            }
+        }
+        connection.start(queue: net)
+        net.asyncAfter(deadline: .now() + channelRequestDeadline) { connection.cancel() }
+        receive(connection, buffer: Data())
     }
 
     private func receive(_ connection: NWConnection, buffer: Data) {
@@ -431,6 +482,12 @@ private final class Channel {
 }
 
 // MARK: - Helpers
+
+/// How long startup waits for the webhook port before giving up.
+private let channelBindWait: TimeInterval = 20
+/// Limits on unauthenticated webhook connections.
+private let channelMaxConnections = 32
+private let channelRequestDeadline: TimeInterval = 10
 
 /// Largest webhook body accepted. A poller batch is a few texts; anything near this is not one.
 private let channelMaxBody = 1_048_576
