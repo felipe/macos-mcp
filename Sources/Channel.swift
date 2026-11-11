@@ -324,8 +324,9 @@ private final class Channel {
         // Meta values become attributes on the channel tag; they must be strings.
         // The poller sends chat.db's chat_identifier: a phone number or email for a
         // direct chat, "chat<digits>" for a group. The two need different reply tools.
+        // (An address such as chat@example.com is a direct chat.)
         let chatID = json["chat_id"] as? String ?? from
-        let isGroup = chatID.hasPrefix("chat")
+        let isGroup = AccessConfig.isGroupIdentifier(chatID)
         // Only call the sender the owner when the text came from the owner's own number.
         var user = from
         if !isGroup, let name = config.ownerName, let phone = config.ownerPhone, samePhone(from, phone) {
@@ -422,11 +423,12 @@ private struct ChannelHTTPRequest {
     }
 }
 
-/// Same number, ignoring formatting and a leading country code on either side.
-private func samePhone(_ a: String, _ b: String) -> Bool {
-    let x = a.filter(\.isNumber), y = b.filter(\.isNumber)
-    guard x.count >= 10, y.count >= 10 else { return !x.isEmpty && x == y }
-    return x == y || x.suffix(10) == y.suffix(10)
+/// True when `handle` is the owner's phone number. An email handle is never the
+/// owner's phone, whatever digits it contains.
+private func samePhone(_ handle: String, _ ownerPhone: String) -> Bool {
+    guard !handle.contains("@"), !ownerPhone.contains("@") else { return false }
+    let a = AccessConfig.normalizePhone(handle), b = AccessConfig.normalizePhone(ownerPhone)
+    return a.hasPrefix("+") && a == b
 }
 
 private func channelHMAC(_ data: Data, key: String) -> String {

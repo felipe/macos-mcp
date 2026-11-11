@@ -111,6 +111,10 @@ with tempfile.TemporaryDirectory(prefix='macos-mcp-channel-') as tmp:
             assert stranger['user'] == '+15559998888' and stranger['chat_type'] == 'direct', stranger
             group = deliver('chat123456789')
             assert group['user'] == 'chat123456789' and group['chat_type'] == 'group', group
+            # An email handle is a direct chat and never the owner, whatever it looks like.
+            for address in ('chat@example.com', '15550001111@example.com'):
+                email = deliver(address)
+                assert email['user'] == address and email['chat_type'] == 'direct', email
 
             # Bad framing is refused before the signature check and does not take the channel down.
             for length in ('-1', 'abc', str(64 * 1024 * 1024)):
