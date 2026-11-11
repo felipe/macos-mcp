@@ -21,6 +21,7 @@ private struct ChannelConfig {
     var logFile: String?
     var ownerName: String?
     var ownerPhone: String?
+    var mcpToken: String?
 }
 
 // MARK: - Entry
@@ -32,6 +33,7 @@ func runChannel(args: [String]) -> Never {
     config.ownerName = env["MACOS_MCP_OWNER_NAME"]
     config.ownerPhone = env["MACOS_MCP_OWNER_PHONE"]
     var secretFile = env["MACOS_MCP_WEBHOOK_SECRET_FILE"]
+    var tokenFile: String?
 
     var i = 0
     func value(_ flag: String) -> String {
@@ -50,6 +52,7 @@ func runChannel(args: [String]) -> Never {
         case "--log-file": config.logFile = value("--log-file")
         case "--owner-name": config.ownerName = value("--owner-name")
         case "--owner-phone": config.ownerPhone = value("--owner-phone")
+        case "--mcp-token-file": tokenFile = value("--mcp-token-file")
         default: exitWithError("Unknown channel option: \(args[i])")
         }
         i += 1
@@ -64,6 +67,12 @@ func runChannel(args: [String]) -> Never {
     }
     guard let secret = config.secret, !secret.isEmpty else {
         exitWithError("channel needs the webhook secret: --webhook-secret-file PATH or MACOS_MCP_WEBHOOK_SECRET")
+    }
+    // Same token sources as `serve`: a non-loopback serve address requires one.
+    do {
+        config.mcpToken = try ServeAccess.loadToken(tokenFile: tokenFile, environment: env)
+    } catch {
+        exitWithError("Cannot load MCP token: \(error)")
     }
     guard config.host == "127.0.0.1" || config.host == "localhost" || config.host == "::1" else {
         exitWithError("channel only listens on loopback; got --host \(config.host)")
@@ -83,6 +92,11 @@ private final class Channel {
     private let work = DispatchQueue(label: "macos-mcp.channel.work", attributes: .concurrent)
     private let net = DispatchQueue(label: "macos-mcp.channel.net")
     private var listener: NWListener?
+    // Events that arrive before the client finishes its MCP handshake are held and
+    // delivered in order once it has. The poller does not resend an accepted text.
+    private let eventLock = NSLock()
+    private var sessionReady = false
+    private var heldEvents: [[String: Any]] = []
     private let session: URLSession
 
     init(config: ChannelConfig, secret: String) {
@@ -117,6 +131,10 @@ private final class Channel {
 
     private func handle(_ message: [String: Any]) {
         let method = message["method"] as? String ?? ""
+        // The handshake ends with notifications/initialized. Any later request also
+        // proves the client is past it, so a client that skips the notification
+        // still gets its held events.
+        if method != "initialize" && method != "ping" { sessionBecameReady() }
         // Notifications and responses carry no id (or no method); nothing to answer.
         guard let id = message["id"], !method.isEmpty else { return }
         let params = message["params"] as? [String: Any] ?? [:]
@@ -192,6 +210,9 @@ private final class Channel {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
+        if let token = config.mcpToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
         request.httpBody = try? JSONSerialization.data(withJSONObject: [
             "jsonrpc": "2.0", "id": 1, "method": method, "params": params,
         ] as [String: Any])
@@ -341,13 +362,37 @@ private final class Channel {
         if let count = json["message_count"] as? Int { meta["message_count"] = String(count) }
         if let rowids = json["rowids"] as? [Int], let last = rowids.max() { meta["rowid"] = String(last) }
 
-        write([
+        let delivered = emit([
             "jsonrpc": "2.0",
             "method": "notifications/claude/channel",
             "params": ["content": text, "meta": meta] as [String: Any],
         ])
-        log("delivered to session", ["from": from, "chars": text.count, "rowid": meta["rowid"] ?? ""])
+        log(delivered ? "delivered to session" : "held until the session is ready",
+            ["from": from, "chars": text.count, "rowid": meta["rowid"] ?? ""])
         return (200, "{\"received\":true}")
+    }
+
+    /// Write a channel event, or hold it if the client has not finished initializing.
+    /// Returns false when held.
+    private func emit(_ event: [String: Any]) -> Bool {
+        eventLock.lock()
+        defer { eventLock.unlock() }
+        guard sessionReady else {
+            heldEvents.append(event)
+            return false
+        }
+        write(event)
+        return true
+    }
+
+    private func sessionBecameReady() {
+        eventLock.lock()
+        let held = heldEvents
+        heldEvents = []
+        sessionReady = true
+        for event in held { write(event) }
+        eventLock.unlock()
+        if !held.isEmpty { log("delivered to session", ["held": held.count]) }
     }
 
     // MARK: logging

@@ -60,6 +60,7 @@ claude --dangerously-load-development-channels server:macos-mcp
 |---|---|---|
 | `--port` | `7888` | Webhook port. Loopback only. |
 | `--mcp-url` | `http://127.0.0.1:9200/mcp` | The `serve` instance to pass tool calls to. |
+| `--mcp-token-file` | `MACOS_MCP_TOKEN_FILE` | Bearer token for a `serve` instance that is not on loopback. |
 | `--webhook-secret-file` | `MACOS_MCP_WEBHOOK_SECRET_FILE`, or the secret itself in `MACOS_MCP_WEBHOOK_SECRET` | Must match `serve --webhook-secret`. Unsigned or wrongly signed posts get a 401. |
 | `--owner-name`, `--owner-phone` | `MACOS_MCP_OWNER_NAME`, `MACOS_MCP_OWNER_PHONE` | A text from the owner's number is shown to the session under the owner's name. Any other sender is shown by address. |
 | `--log-file` | none | JSON lines: texts delivered, tool calls, upstream failures. |
